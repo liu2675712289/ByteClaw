@@ -10,6 +10,16 @@ from byteclaw.cli.app import app, run
 
 
 class CliTests(unittest.TestCase):
+    def test_installed_entrypoint_defaults_to_tui_without_args(self) -> None:
+        with (
+            patch.object(sys, "argv", ["byteclaw"]),
+            patch("byteclaw.cli.tui.app.tui_cli") as tui_cli,
+        ):
+            run()
+
+            tui_cli.assert_called_once_with()
+            self.assertEqual(sys.argv, ["byteclaw tui"])
+
     def test_installed_entrypoint_dispatches_tui(self) -> None:
         with (
             patch.object(
@@ -26,6 +36,15 @@ class CliTests(unittest.TestCase):
                 sys.argv,
                 ["byteclaw tui", "--workspace", "demo"],
             )
+
+    def test_installed_entrypoint_preserves_task_cli(self) -> None:
+        with (
+            patch.object(sys, "argv", ["byteclaw", "write a file"]),
+            patch("byteclaw.cli.app.app") as cli,
+        ):
+            run()
+
+        cli.assert_called_once_with()
 
     def test_task_command_renders_outputs_and_passes_runtime_options(self) -> None:
         runner = CliRunner()

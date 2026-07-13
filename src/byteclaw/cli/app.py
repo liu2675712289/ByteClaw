@@ -97,10 +97,11 @@ def main(
 def run() -> None:
     """Dispatch the installed command while preserving ``byteclaw TASK``."""
 
-    if len(sys.argv) > 1 and sys.argv[1] == "tui":
+    if len(sys.argv) == 1 or sys.argv[1] == "tui":
         from byteclaw.cli.tui.app import tui_cli
 
-        sys.argv = [f"{sys.argv[0]} tui", *sys.argv[2:]]
+        tui_args = sys.argv[2:] if len(sys.argv) > 1 else []
+        sys.argv = [f"{sys.argv[0]} tui", *tui_args]
         tui_cli()
         return
     app()
