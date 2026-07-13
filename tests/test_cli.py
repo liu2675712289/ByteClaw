@@ -9,17 +9,37 @@ from byteclaw.cli.app import app
 
 
 class CliTests(unittest.TestCase):
-    def test_task_command_creates_workspace(self) -> None:
+    def test_task_command_renders_agent_events(self) -> None:
         runner = CliRunner()
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir) / "new-workspace"
-            with patch("byteclaw.cli.app.run_task", return_value="completed"):
+            events = iter(
+                [
+                    {
+                        "type": "tool_call",
+                        "name": "file_write",
+                        "args": {"file_path": "example.txt", "content": "hello"},
+                    },
+                    {
+                        "type": "tool_result",
+                        "name": "file_write",
+                        "result": "Wrote example.txt",
+                    },
+                    {"type": "final_answer", "content": "completed"},
+                ]
+            )
+            with patch(
+                "byteclaw.cli.app.stream_agent_events", return_value=events
+            ) as stream:
                 result = runner.invoke(
                     app, ["write a file", "--workspace", str(workspace)]
                 )
 
             self.assertEqual(result.exit_code, 0, result.output)
-            self.assertTrue(workspace.is_dir())
+            stream.assert_called_once_with("write a file", workspace=workspace)
+            self.assertIn("file_write", result.output)
+            self.assertIn("example.txt", result.output)
+            self.assertIn("Wrote example.txt", result.output)
             self.assertIn("completed", result.output)
 
 

@@ -4,51 +4,30 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from rich.console import Console
+from rich.panel import Panel
+from rich.pretty import Pretty
 
-from byteclaw.core.state import RuntimeState
-from byteclaw.providers.openai_provider import create_model
-from byteclaw.tools.registry import build_tools
+from byteclaw.core.agent import stream_agent_events
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
+console = Console()
 
 
-def run_task(task: str, state: RuntimeState) -> str:
-    """Run a small tool-calling loop and return the model's final response."""
+def _render_event(event: dict) -> None:
+    """Render one agent event to the terminal."""
 
-    tools = build_tools(state)
-    tools_by_name = {tool.name: tool for tool in tools}
-    model = create_model().bind_tools(tools)
-    messages = [
-        SystemMessage(
-            content=(
-                "You are ByteClaw, a coding assistant. Work only inside the provided "
-                "workspace. Use tools to inspect and modify files, then summarize the result."
-            )
-        ),
-        HumanMessage(content=task),
-    ]
-
-    for _ in range(25):
-        response = model.invoke(messages)
-        messages.append(response)
-        if not response.tool_calls:
-            return str(response.content)
-
-        for tool_call in response.tool_calls:
-            tool = tools_by_name.get(tool_call["name"])
-            if tool is None:
-                result = f"Unknown tool: {tool_call['name']}"
-            else:
-                try:
-                    result = tool.invoke(tool_call["args"])
-                except Exception as exc:  # return tool errors so the model can recover
-                    result = f"{type(exc).__name__}: {exc}"
-            messages.append(
-                ToolMessage(content=str(result), tool_call_id=tool_call["id"])
-            )
-
-    raise RuntimeError("The model exceeded the 25-step tool-call limit")
+    event_type = event["type"]
+    if event_type == "tool_call":
+        console.print(f"[bold cyan]Tool call:[/] {event['name']}")
+        console.print(Pretty(event["args"]))
+    elif event_type == "tool_result":
+        console.print(f"[bold green]Tool result:[/] {event['name']}")
+        console.print(Pretty(event["result"]))
+    elif event_type == "final_answer":
+        console.print(
+            Panel(str(event["content"]), title="ByteClaw", border_style="green")
+        )
 
 
 @app.command()
@@ -67,5 +46,5 @@ def main(
 ) -> None:
     """Run ByteClaw on TASK inside a workspace."""
 
-    state = RuntimeState(workspace)
-    typer.echo(run_task(task, state))
+    for event in stream_agent_events(task, workspace=workspace):
+        _render_event(event)
