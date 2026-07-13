@@ -26,7 +26,7 @@ workspace/
 
 
 
-# IDE 与系统文件,Agent文件
+# IDE 与系统文件
 .vscode/
 .idea/
 .DS_Store
