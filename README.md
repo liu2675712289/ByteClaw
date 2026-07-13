@@ -13,10 +13,6 @@
 
 <br>
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
-[![GitHub Stars](https://img.shields.io/github/stars/你的用户名/ByteClaw?style=social)](https://github.com/你的用户名/ByteClaw)
-[![GitHub Issues](https://img.shields.io/github/issues/你的用户名/ByteClaw)](https://github.com/你的用户名/ByteClaw/issues)
 
 [快速开始](#-快速开始) ·
 [核心功能](#-核心功能) ·
