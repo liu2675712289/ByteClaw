@@ -1,0 +1,35 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+work/
+outputs/
+
+# 环境变量和密钥
+.env.*
+!.env.example
+
+# 其他虚拟环境
+venv/
+env/
+
+# 构建产物
+build/
+dist/
+
+
+.env
+.env.*
+!.env.example
+workspace/
+
+
+
+# IDE 与系统文件,Agent文件
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+.agents/
