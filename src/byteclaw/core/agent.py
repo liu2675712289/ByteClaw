@@ -5,9 +5,20 @@ from pathlib import Path
 from typing import Any
 
 from byteclaw.core.checkpoint import CheckpointManager
+from byteclaw.core.session import (
+    append_assistant_turn,
+    append_user_turn,
+    build_session_context,
+    load_or_create_session,
+    save_session,
+)
 from byteclaw.core.state import ApprovalHandler, create_runtime
 from byteclaw.core.trace import TraceRecorder
-from byteclaw.graph.workflow import build_workflow
+from byteclaw.graph.workflow import (
+    build_complex_workflow,
+    build_entry_workflow,
+    build_workflow,
+)
 
 
 _CHECKPOINT_CUSTOM_EVENT_TYPES = {
@@ -27,6 +38,8 @@ def stream_agent_events(
     checkpoint_mode: str = "light",
     resume_workspace: str | Path | None = None,
     trace_mode: str = "on",
+    session_context: str | None = None,
+    _workflow: Any = None,
 ) -> Iterator[dict[str, Any]]:
     """Run the workflow and persist every event needed for recovery."""
 
@@ -57,9 +70,11 @@ def stream_agent_events(
             "runtime": runtime,
             "max_attempts": max_attempts,
         }
+    if session_context is not None:
+        inputs["session_context"] = session_context
     current_state = dict(inputs)
     latest_node = "start"
-    workflow = build_workflow()
+    workflow = _workflow if _workflow is not None else build_workflow()
 
     trace.start(inputs, resumed=resumed, resume_event=resume_event)
     try:
@@ -133,6 +148,91 @@ def stream_agent_events(
             latest_node=latest_node,
             final_state=current_state,
         )
+
+
+def stream_session_events(
+    task: str,
+    *,
+    session_workspace: str | Path | None = None,
+    max_attempts: int = 3,
+    approval_mode: str = "inline",
+    approval_handler: ApprovalHandler | None = None,
+    checkpoint_mode: str = "light",
+    resume_workspace: str | Path | None = None,
+    trace_mode: str = "on",
+) -> Iterator[dict[str, Any]]:
+    """Stream one session turn through chat or the full agent workflow."""
+
+    workspace = Path(resume_workspace or session_workspace or "workspace")
+    session = load_or_create_session(workspace)
+    turn = append_user_turn(session, task)
+    save_session(workspace, session)
+    session_context = build_session_context(workspace, session)
+
+    entry_state: dict[str, Any] = {
+        "task": task,
+        "session_context": session_context,
+    }
+    latest_node = "start"
+    entry_workflow = build_entry_workflow()
+    for event in entry_workflow.stream(
+        entry_state,
+        stream_mode="updates",
+    ):
+        latest_node = _merge_graph_update(
+            entry_state,
+            event,
+            latest_node,
+        )
+        yield {"type": "graph_event", "event": event}
+
+    if entry_state.get("intent_route") == "chat":
+        content = str(
+            entry_state.get("final_answer")
+            or entry_state.get("chat_response")
+            or ""
+        )
+        append_assistant_turn(
+            session,
+            turn=turn,
+            route="chat",
+            content=content,
+        )
+        save_session(workspace, session)
+        return
+
+    content = ""
+    workflow = build_complex_workflow()
+    for event in stream_agent_events(
+        task,
+        workspace=workspace,
+        max_attempts=max_attempts,
+        approval_mode=approval_mode,
+        approval_handler=approval_handler,
+        checkpoint_mode=checkpoint_mode,
+        resume_workspace=resume_workspace,
+        trace_mode=trace_mode,
+        session_context=session_context,
+        _workflow=workflow,
+    ):
+        graph_event = event.get("event")
+        if event.get("type") == "graph_event" and isinstance(
+            graph_event, Mapping
+        ):
+            final_output = graph_event.get("final")
+            if isinstance(final_output, Mapping):
+                content = str(final_output.get("final_answer", content))
+            elif final_output is not None:
+                content = str(final_output)
+        yield event
+
+    append_assistant_turn(
+        session,
+        turn=turn,
+        route="workflow",
+        content=content,
+    )
+    save_session(workspace, session)
 
 
 def _custom_event_needs_checkpoint(event: Any) -> bool:

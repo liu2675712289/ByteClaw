@@ -1,4 +1,4 @@
-"""Core planner, specialist-supervisor, and verifier nodes."""
+"""Core intent, planner, specialist-supervisor, and verifier nodes."""
 
 import json
 import re
@@ -15,7 +15,7 @@ from langchain_core.messages import (
 )
 from langgraph.config import get_stream_writer
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from byteclaw.core.state import RuntimeState
 from byteclaw.graph.memory import (
@@ -41,6 +41,36 @@ TodoStatus = Literal["pending", "in_progress", "completed", "blocked"]
 MAX_PLANNER_STEPS = 10
 MAX_ACTOR_STEPS = 25
 MAX_VERIFIER_TOOL_STEPS = 10
+
+INTENT_ROUTER_PROMPT = """You are the intent router for ByteClaw.
+
+Classify the user's latest input into exactly one route:
+- chat: greetings, thanks, identity/help questions, ordinary conceptual Q&A,
+  or conversational messages that do not need workspace access.
+- workflow: any request that needs creating/editing/reading files, running commands,
+  installing packages, searching the web, checking the current project, verifying a
+  result, or producing a concrete deliverable.
+
+When session context is provided, use it only to understand whether the latest
+input is a continuation of prior coding work. A short follow-up like "继续",
+"修一下", or "运行测试" should be workflow if it refers to prior workspace work.
+
+Return only JSON with this shape:
+{"route":"chat"|"workflow","reason":"brief reason","confidence":0.0}
+
+If uncertain, choose workflow.
+"""
+
+CHAT_RESPONDER_PROMPT = """You are ByteClaw's lightweight chat node.
+
+Answer the user directly and concisely. Do not claim that you read files,
+searched the web, ran commands, edited files, or inspected the workspace.
+If the user asks for work requiring tools or project context, say that it
+should be handled by the workflow route.
+
+If session context is provided, you may use the recent conversation summary to
+answer conversational follow-ups, but do not invent workspace facts.
+"""
 
 _WORKSPACE_CD_PREFIX = re.compile(
     r"^\s*cd\s+[\"']?/workspace[\"']?\s*(?:&&|;)\s*",
@@ -97,6 +127,12 @@ class VerifierOutput(BaseModel):
     recommended_next_instruction: str
 
 
+class IntentRouterOutput(BaseModel):
+    route: Literal["chat", "workflow"]
+    reason: str
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
 def _content_to_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -134,6 +170,71 @@ def _event_writer():
         return get_stream_writer()
     except RuntimeError:
         return lambda event: None
+
+
+def intent_router_node(state: ByteGraphState) -> dict:
+    """Classify the latest input as lightweight chat or workflow work."""
+
+    request = {
+        "user_input": state.get("task", ""),
+        "session_context": state.get(
+            "session_context", state.get("session", {})
+        ),
+    }
+    response = create_model().invoke(
+        [
+            SystemMessage(content=INTENT_ROUTER_PROMPT),
+            HumanMessage(
+                content=json.dumps(request, ensure_ascii=False, default=str)
+            ),
+        ]
+    )
+    try:
+        result = IntentRouterOutput.model_validate(
+            _parse_json_content(response.content)
+        )
+    except ValueError:
+        return {
+            "intent_route": "workflow",
+            "intent_reason": "Invalid intent router response",
+            "intent_confidence": 0.0,
+        }
+
+    route = result.route if result.confidence >= 0.55 else "workflow"
+    return {
+        "intent_route": route,
+        "intent_reason": result.reason,
+        "intent_confidence": result.confidence,
+    }
+
+
+def chat_responder_node(state: ByteGraphState) -> dict:
+    """Answer a conversational request without binding or calling tools."""
+
+    request = {
+        "user_input": state.get("task", ""),
+        "session_context": state.get(
+            "session_context", state.get("session", {})
+        ),
+    }
+    response = create_model().invoke(
+        [
+            SystemMessage(content=CHAT_RESPONDER_PROMPT),
+            HumanMessage(
+                content=json.dumps(request, ensure_ascii=False, default=str)
+            ),
+        ]
+    )
+    content = _content_to_text(response.content)
+    return {"chat_response": content, "final_answer": content}
+
+
+def intent_route_fn(state: ByteGraphState) -> str:
+    return (
+        "chat_responder"
+        if state.get("intent_route") == "chat"
+        else "planner"
+    )
 
 
 def _plan_fields(state: ByteGraphState) -> dict:
@@ -281,6 +382,7 @@ def _planner_input(state: ByteGraphState, memory: dict) -> str:
     if state.get("todos"):
         request = {
             "task": state.get("task", ""),
+            "session_context": state.get("session_context", ""),
             "current_plan": _plan_fields(state),
             "last_error": state.get("last_error", ""),
             "instruction": "Revise the plan to address the verification failure.",
@@ -288,6 +390,7 @@ def _planner_input(state: ByteGraphState, memory: dict) -> str:
     else:
         request = {
             "task": state.get("task", ""),
+            "session_context": state.get("session_context", ""),
             "instruction": "Create the initial implementation plan.",
         }
     return (

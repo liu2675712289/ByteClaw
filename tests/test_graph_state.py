@@ -49,6 +49,12 @@ class GraphStateTests(unittest.TestCase):
         annotations = get_type_hints(ByteGraphState, include_extras=True)
 
         self.assertIs(annotations["research_notes"], str)
+        self.assertEqual(
+            get_args(annotations["intent_route"]), ("chat", "workflow")
+        )
+        self.assertIs(annotations["intent_reason"], str)
+        self.assertIs(annotations["intent_confidence"], float)
+        self.assertIs(annotations["chat_response"], str)
         self.assertEqual(get_args(annotations["sources"]), (SourceItem,))
         self.assertEqual(
             get_args(annotations["agent_handoffs"]), (AgentHandoff,)

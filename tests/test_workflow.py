@@ -2,7 +2,11 @@ import unittest
 from unittest.mock import patch
 
 from byteclaw.graph.nodes import final_node
-from byteclaw.graph.workflow import build_complex_workflow, build_workflow
+from byteclaw.graph.workflow import (
+    build_complex_workflow,
+    build_entry_workflow,
+    build_workflow,
+)
 from byteclaw.prompts.stage2 import (
     ACTOR_PROMPT,
     FINAL_PROMPT,
@@ -11,6 +15,55 @@ from byteclaw.prompts.stage3 import PLANNER_PROMPT, VERIFIER_PROMPT
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_entry_workflow_routes_chat_and_workflow_inputs(self) -> None:
+        calls: list[str] = []
+
+        def intent_router(state):
+            calls.append("intent_router")
+            route = "chat" if state["task"] == "hello" else "workflow"
+            return {
+                "intent_route": route,
+                "intent_reason": "test route",
+                "intent_confidence": 1.0,
+            }
+
+        def chat_responder(state):
+            calls.append("chat_responder")
+            return {
+                "chat_response": "Hello!",
+                "final_answer": "Hello!",
+            }
+
+        with (
+            patch(
+                "byteclaw.graph.workflow.intent_router_node", intent_router
+            ),
+            patch(
+                "byteclaw.graph.workflow.chat_responder_node",
+                chat_responder,
+            ),
+        ):
+            workflow = build_entry_workflow()
+            chat_result = workflow.invoke({"task": "hello"})
+            workflow_result = workflow.invoke({"task": "edit app.py"})
+
+        self.assertEqual(
+            calls,
+            ["intent_router", "chat_responder", "intent_router"],
+        )
+        self.assertEqual(chat_result["final_answer"], "Hello!")
+        self.assertEqual(workflow_result["intent_route"], "workflow")
+        self.assertNotIn("final_answer", workflow_result)
+        self.assertEqual(
+            set(workflow.get_graph().nodes),
+            {
+                "__start__",
+                "intent_router",
+                "chat_responder",
+                "__end__",
+            },
+        )
+
     def test_final_node_formats_passed_and_failed_states(self) -> None:
         passed = final_node(
             {

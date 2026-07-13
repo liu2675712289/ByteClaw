@@ -1,6 +1,6 @@
 """Shared state schema for the ByteClaw LangGraph workflow."""
 
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -63,8 +63,14 @@ class VerificationCheck(TypedDict):
 
 class ByteGraphState(TypedDict, total=False):
     task: str
+    session_context: str | dict[str, Any]
+    session: dict[str, Any]
     runtime: RuntimeState
     messages: Annotated[list[BaseMessage], add_messages]
+    intent_route: Literal["chat", "workflow"]
+    intent_reason: str
+    intent_confidence: float
+    chat_response: str
     plan_summary: str
     todos: list[TodoItem]
     acceptance_criteria: list[str]

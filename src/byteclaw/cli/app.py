@@ -1,5 +1,6 @@
 """Typer application for the ``byteclaw`` command."""
 
+import sys
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -15,6 +16,7 @@ app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
     context_settings={"allow_extra_args": True},
+    epilog="Launch the interactive interface with: byteclaw tui [OPTIONS]",
 )
 console = Console()
 
@@ -90,3 +92,15 @@ def main(
         resume_workspace=resume,
     ):
         _render_event(event)
+
+
+def run() -> None:
+    """Dispatch the installed command while preserving ``byteclaw TASK``."""
+
+    if len(sys.argv) > 1 and sys.argv[1] == "tui":
+        from byteclaw.cli.tui.app import tui_cli
+
+        sys.argv = [f"{sys.argv[0]} tui", *sys.argv[2:]]
+        tui_cli()
+        return
+    app()

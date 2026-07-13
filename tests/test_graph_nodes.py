@@ -15,6 +15,8 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 
 from byteclaw.core.state import RuntimeState
 from byteclaw.graph.nodes import (
+    CHAT_RESPONDER_PROMPT,
+    INTENT_ROUTER_PROMPT,
     CallCodeAgentTool,
     CallSearchAgentTool,
     TodoUpdateTool,
@@ -22,10 +24,13 @@ from byteclaw.graph.nodes import (
     _call_code_agent_tool,
     _call_search_agent_tool,
     actor_node,
+    chat_responder_node,
     context_compressor_node,
     context_compressor_route,
     context_monitor_node,
     context_monitor_route,
+    intent_route_fn,
+    intent_router_node,
     planner_node,
     verifier_node,
     verifier_route,
@@ -67,6 +72,100 @@ class FakeModel:
 
 
 class GraphNodeTests(unittest.TestCase):
+    def test_intent_router_routes_valid_chat_with_session_context(self) -> None:
+        response = AIMessage(
+            content=json.dumps(
+                {
+                    "route": "chat",
+                    "reason": "Conversational greeting",
+                    "confidence": 0.96,
+                }
+            )
+        )
+        agent = FakeAgent([response])
+        model = FakeModel(agent)
+
+        with patch("byteclaw.graph.nodes.create_model", return_value=model):
+            update = intent_router_node(
+                {
+                    "task": "你好",
+                    "session_context": {"summary": "Recent greeting"},
+                }
+            )
+
+        self.assertEqual(update["intent_route"], "chat")
+        self.assertEqual(update["intent_reason"], "Conversational greeting")
+        self.assertEqual(update["intent_confidence"], 0.96)
+        messages = agent.message_snapshots[0]
+        self.assertIsInstance(messages[0], SystemMessage)
+        self.assertEqual(messages[0].content, INTENT_ROUTER_PROMPT)
+        request = json.loads(messages[1].content)
+        self.assertEqual(request["user_input"], "你好")
+        self.assertEqual(
+            request["session_context"], {"summary": "Recent greeting"}
+        )
+        self.assertIsNone(model.bound_tools)
+
+    def test_intent_router_defaults_invalid_or_low_confidence_to_workflow(
+        self,
+    ) -> None:
+        agent = FakeAgent(
+            [
+                AIMessage(
+                    content=json.dumps(
+                        {
+                            "route": "chat",
+                            "reason": "Uncertain greeting",
+                            "confidence": 0.54,
+                        }
+                    )
+                ),
+                AIMessage(content="not json"),
+            ]
+        )
+        model = FakeModel(agent)
+
+        with patch("byteclaw.graph.nodes.create_model", return_value=model):
+            low_confidence = intent_router_node({"task": "继续"})
+            invalid = intent_router_node({"task": "hello"})
+
+        self.assertEqual(low_confidence["intent_route"], "workflow")
+        self.assertEqual(low_confidence["intent_confidence"], 0.54)
+        self.assertEqual(invalid["intent_route"], "workflow")
+        self.assertEqual(invalid["intent_confidence"], 0.0)
+
+    def test_chat_responder_returns_direct_answer_without_tools(self) -> None:
+        agent = FakeAgent([AIMessage(content="你好！有什么可以帮你？")])
+        model = FakeModel(agent)
+
+        with patch("byteclaw.graph.nodes.create_model", return_value=model):
+            update = chat_responder_node(
+                {
+                    "task": "你好",
+                    "session": {"summary": "The user greeted ByteClaw"},
+                }
+            )
+
+        self.assertEqual(update["chat_response"], "你好！有什么可以帮你？")
+        self.assertEqual(update["final_answer"], update["chat_response"])
+        messages = agent.message_snapshots[0]
+        self.assertEqual(messages[0].content, CHAT_RESPONDER_PROMPT)
+        request = json.loads(messages[1].content)
+        self.assertEqual(
+            request["session_context"],
+            {"summary": "The user greeted ByteClaw"},
+        )
+        self.assertIsNone(model.bound_tools)
+
+    def test_intent_route(self) -> None:
+        self.assertEqual(
+            intent_route_fn({"intent_route": "chat"}), "chat_responder"
+        )
+        self.assertEqual(
+            intent_route_fn({"intent_route": "workflow"}), "planner"
+        )
+        self.assertEqual(intent_route_fn({}), "planner")
+
     def test_planner_creates_structured_plan(self) -> None:
         plan_response = AIMessage(
             content="",
@@ -147,7 +246,12 @@ class GraphNodeTests(unittest.TestCase):
                 },
             ),
         ):
-            update = planner_node({"task": "Build a page"})
+            update = planner_node(
+                {
+                    "task": "Build a page",
+                    "session_context": "Earlier we discussed the page layout.",
+                }
+            )
 
         self.assertEqual(update["plan_summary"], "Build and test the page")
         self.assertEqual(update["todos"][0]["status"], "completed")
@@ -168,6 +272,10 @@ class GraphNodeTests(unittest.TestCase):
         self.assertEqual(update["memory_snapshot"], memory)
         self.assertIn(
             "Layered memory:", agent.message_snapshots[0][-1].content
+        )
+        self.assertIn(
+            "Earlier we discussed the page layout.",
+            agent.message_snapshots[0][-1].content,
         )
         self.assertEqual(
             [item["to_agent"] for item in update["agent_handoffs"]],

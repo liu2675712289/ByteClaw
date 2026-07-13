@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from byteclaw.core.agent import stream_agent_events
+from byteclaw.core.agent import stream_agent_events, stream_session_events
 
 
 class FakeWorkflow:
@@ -24,6 +24,30 @@ class FakeWorkflow:
         }
         yield "updates", {"verifier": {"passed": True, "attempts": 1}}
         yield "updates", {"final": {"final_answer": "Status: PASSED"}}
+
+
+class FakeEntryWorkflow:
+    def __init__(self, route: str, content: str = "") -> None:
+        self.route = route
+        self.content = content
+        self.calls = []
+
+    def stream(self, inputs: dict, *, stream_mode: str):
+        self.calls.append((inputs, stream_mode))
+        yield {
+            "intent_router": {
+                "intent_route": self.route,
+                "intent_reason": "test route",
+                "intent_confidence": 1.0,
+            }
+        }
+        if self.route == "chat":
+            yield {
+                "chat_responder": {
+                    "chat_response": self.content,
+                    "final_answer": self.content,
+                }
+            }
 
 
 class FakeCheckpointManager:
@@ -115,6 +139,142 @@ class AgentTests(unittest.TestCase):
         FakeCheckpointManager.resume_result = None
         FakeCheckpointManager.resume_calls = []
         FakeTraceRecorder.instances = []
+
+    def test_session_chat_route_records_turn_without_complex_workflow(
+        self,
+    ) -> None:
+        entry_workflow = FakeEntryWorkflow("chat", "Hello from ByteClaw")
+        session = {"session_id": "session-chat", "recent_turns": []}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            with (
+                patch(
+                    "byteclaw.core.agent.load_or_create_session",
+                    return_value=session,
+                ) as load,
+                patch(
+                    "byteclaw.core.agent.append_user_turn",
+                    return_value=4,
+                ) as append_user,
+                patch("byteclaw.core.agent.save_session") as save,
+                patch(
+                    "byteclaw.core.agent.build_session_context",
+                    return_value="bounded session context",
+                ) as build_context,
+                patch(
+                    "byteclaw.core.agent.append_assistant_turn"
+                ) as append_assistant,
+                patch(
+                    "byteclaw.core.agent.build_entry_workflow",
+                    return_value=entry_workflow,
+                ),
+                patch(
+                    "byteclaw.core.agent.build_complex_workflow"
+                ) as build_complex,
+            ):
+                events = list(
+                    stream_session_events(
+                        "hello",
+                        session_workspace=workspace,
+                    )
+                )
+
+        load.assert_called_once_with(workspace)
+        append_user.assert_called_once_with(session, "hello")
+        build_context.assert_called_once_with(workspace, session)
+        append_assistant.assert_called_once_with(
+            session,
+            turn=4,
+            route="chat",
+            content="Hello from ByteClaw",
+        )
+        self.assertEqual(save.call_count, 2)
+        build_complex.assert_not_called()
+        self.assertEqual(entry_workflow.calls[0][1], "updates")
+        self.assertEqual(
+            entry_workflow.calls[0][0]["session_context"],
+            "bounded session context",
+        )
+        self.assertEqual(len(events), 2)
+        self.assertEqual(
+            events[-1]["event"]["chat_responder"]["final_answer"],
+            "Hello from ByteClaw",
+        )
+
+    def test_session_workflow_route_passes_context_and_records_final_answer(
+        self,
+    ) -> None:
+        entry_workflow = FakeEntryWorkflow("workflow")
+        complex_workflow = FakeWorkflow()
+        session = {"session_id": "session-workflow", "recent_turns": []}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            with (
+                patch(
+                    "byteclaw.core.agent.load_or_create_session",
+                    return_value=session,
+                ),
+                patch(
+                    "byteclaw.core.agent.append_user_turn",
+                    return_value=7,
+                ),
+                patch("byteclaw.core.agent.save_session") as save,
+                patch(
+                    "byteclaw.core.agent.build_session_context",
+                    return_value="workflow session context",
+                ),
+                patch(
+                    "byteclaw.core.agent.append_assistant_turn"
+                ) as append_assistant,
+                patch(
+                    "byteclaw.core.agent.build_entry_workflow",
+                    return_value=entry_workflow,
+                ),
+                patch(
+                    "byteclaw.core.agent.build_complex_workflow",
+                    return_value=complex_workflow,
+                ) as build_complex,
+                patch(
+                    "byteclaw.core.agent.build_workflow"
+                ) as build_stable,
+                patch(
+                    "byteclaw.core.agent.CheckpointManager",
+                    FakeCheckpointManager,
+                ),
+                patch(
+                    "byteclaw.core.agent.TraceRecorder",
+                    FakeTraceRecorder,
+                ),
+            ):
+                events = list(
+                    stream_session_events(
+                        "create a page",
+                        session_workspace=workspace,
+                        max_attempts=5,
+                        approval_mode="auto",
+                    )
+                )
+
+        build_complex.assert_called_once_with()
+        build_stable.assert_not_called()
+        workflow_inputs, stream_modes = complex_workflow.calls[0]
+        self.assertEqual(workflow_inputs["task"], "create a page")
+        self.assertEqual(workflow_inputs["max_attempts"], 5)
+        self.assertEqual(
+            workflow_inputs["session_context"],
+            "workflow session context",
+        )
+        self.assertEqual(stream_modes, ["updates", "custom"])
+        append_assistant.assert_called_once_with(
+            session,
+            turn=7,
+            route="workflow",
+            content="Status: PASSED",
+        )
+        self.assertEqual(save.call_count, 2)
+        self.assertEqual(len(events), 6)
 
     def test_stream_records_events_and_saves_lifecycle_checkpoints(self) -> None:
         workflow = FakeWorkflow()
