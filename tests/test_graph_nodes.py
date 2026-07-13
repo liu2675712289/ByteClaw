@@ -48,6 +48,9 @@ class FakeModel:
         self.bound_tools = tools
         return self.agent
 
+    def invoke(self, messages: list) -> AIMessage:
+        return self.agent.invoke(messages)
+
 
 class GraphNodeTests(unittest.TestCase):
     def test_planner_creates_structured_plan(self) -> None:
@@ -67,7 +70,9 @@ class GraphNodeTests(unittest.TestCase):
                             }
                         ],
                         "acceptance_criteria": ["Page loads"],
-                        "verification_commands": ["python -m unittest"],
+                        "verification_commands": [
+                            "cd /workspace && python -m unittest"
+                        ],
                     },
                     "id": "plan-1",
                     "type": "tool_call",
@@ -82,6 +87,9 @@ class GraphNodeTests(unittest.TestCase):
 
         self.assertEqual(update["plan_summary"], "Build and test the page")
         self.assertEqual(update["todos"][0]["status"], "pending")
+        self.assertEqual(
+            update["verification_commands"], ["python -m unittest"]
+        )
         self.assertEqual(model.bound_tools, [TodoWriteTool])
 
     def test_planner_revises_failed_plan(self) -> None:
@@ -206,6 +214,48 @@ class GraphNodeTests(unittest.TestCase):
             ],
         )
 
+    def test_actor_reports_when_tool_step_limit_is_reached(self) -> None:
+        file_tool = FakeTool("file_read", "contents")
+        responses = [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "file_read",
+                        "args": {"file_path": "example.txt"},
+                        "id": f"read-{index}",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+            for index in range(2)
+        ]
+        events: list[dict] = []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = {
+                "task": "Inspect a file",
+                "runtime": RuntimeState(Path(temp_dir)),
+            }
+            with (
+                patch(
+                    "byteclaw.graph.nodes.build_tools", return_value=[file_tool]
+                ),
+                patch(
+                    "byteclaw.graph.nodes.create_model",
+                    return_value=FakeModel(FakeAgent(responses)),
+                ),
+                patch("byteclaw.graph.nodes.MAX_ACTOR_STEPS", 2),
+                patch(
+                    "byteclaw.graph.nodes.get_stream_writer",
+                    return_value=events.append,
+                ),
+            ):
+                update = actor_node(state)
+
+        self.assertIn("tool-step limit", update["last_actor_summary"])
+        self.assertEqual(events[-1]["content"], update["last_actor_summary"])
+
     def test_verifier_runs_commands_and_completes_todos(self) -> None:
         verdict = {
             "passed": True,
@@ -283,6 +333,56 @@ class GraphNodeTests(unittest.TestCase):
         self.assertEqual(update["verification_results"][0]["exit_code"], 7)
         self.assertIn("Failed commands", update["last_error"])
         self.assertEqual(update["todos"][0]["status"], "blocked")
+
+    def test_verifier_forces_final_verdict_after_tool_step_limit(self) -> None:
+        read_tool = FakeTool("file_read", "contents")
+        tool_responses = [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "file_read",
+                        "args": {"file_path": "example.txt"},
+                        "id": f"read-{index}",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+            for index in range(2)
+        ]
+        verdict = AIMessage(
+            content=json.dumps(
+                {
+                    "passed": True,
+                    "reason": "Inspection passed",
+                    "checks": [],
+                    "recommended_next_instruction": "",
+                }
+            )
+        )
+        agent = FakeAgent([*tool_responses, verdict])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = {"runtime": RuntimeState(Path(temp_dir))}
+            with (
+                patch(
+                    "byteclaw.graph.nodes.build_read_only_tools",
+                    return_value=[read_tool],
+                ),
+                patch(
+                    "byteclaw.graph.nodes.create_model",
+                    return_value=FakeModel(agent),
+                ),
+                patch("byteclaw.graph.nodes.MAX_VERIFIER_TOOL_STEPS", 2),
+            ):
+                update = verifier_node(state)
+
+        self.assertTrue(update["passed"])
+        self.assertEqual(len(read_tool.calls), 2)
+        self.assertIn(
+            "Return the final JSON verdict now",
+            agent.message_snapshots[-1][-1].content,
+        )
 
     def test_verifier_route(self) -> None:
         self.assertEqual(verifier_route({"passed": True}), "final")

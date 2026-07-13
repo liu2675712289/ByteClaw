@@ -17,6 +17,13 @@ from byteclaw.providers.openai_provider import create_model
 from byteclaw.tools.registry import build_read_only_tools, build_tools
 
 TodoStatus = Literal["pending", "in_progress", "completed", "blocked"]
+MAX_ACTOR_STEPS = 25
+MAX_VERIFIER_TOOL_STEPS = 10
+
+_WORKSPACE_CD_PREFIX = re.compile(
+    r"^\s*cd\s+[\"']?/workspace[\"']?\s*(?:&&|;)\s*",
+    flags=re.IGNORECASE,
+)
 
 
 class TodoInput(BaseModel):
@@ -111,6 +118,14 @@ def _plan_fields(state: ByteGraphState) -> dict:
     }
 
 
+def _workspace_relative_commands(commands: list[str]) -> list[str]:
+    normalized = [
+        _WORKSPACE_CD_PREFIX.sub("", command, count=1).strip()
+        for command in commands
+    ]
+    return [command for command in normalized if command]
+
+
 def planner_node(state: ByteGraphState) -> dict:
     """Create an initial plan or revise it after failed verification."""
 
@@ -140,6 +155,9 @@ def planner_node(state: ByteGraphState) -> dict:
     plan = TodoWriteTool.model_validate(
         _tool_payload(response, TodoWriteTool)
     ).model_dump()
+    plan["verification_commands"] = _workspace_relative_commands(
+        plan["verification_commands"]
+    )
     return plan
 
 
@@ -182,7 +200,8 @@ def actor_node(state: ByteGraphState) -> dict:
     new_messages = []
     last_actor_summary = ""
 
-    for _ in range(10):
+    completed = False
+    for _ in range(MAX_ACTOR_STEPS):
         response = agent.invoke(messages)
         messages.append(response)
         new_messages.append(response)
@@ -190,6 +209,7 @@ def actor_node(state: ByteGraphState) -> dict:
         writer({"type": "ai_message", "content": response.content})
 
         if not response.tool_calls:
+            completed = True
             break
 
         for call in response.tool_calls:
@@ -207,6 +227,16 @@ def actor_node(state: ByteGraphState) -> dict:
             messages.append(tool_message)
             new_messages.append(tool_message)
             writer({"type": "tool_result", "name": name, "result": result})
+
+    if not completed:
+        incomplete_todos = sum(
+            todo["status"] != "completed" for todo in todos
+        )
+        last_actor_summary = (
+            f"Actor reached the {MAX_ACTOR_STEPS}-step tool-step limit before "
+            f"returning a final response; {incomplete_todos} todo(s) remain "
+            "incomplete."
+        )
 
     writer({"type": "final_answer", "content": last_actor_summary})
     return {
@@ -292,7 +322,8 @@ def verifier_node(state: ByteGraphState) -> dict:
 
     tools = build_read_only_tools(runtime)
     tools_by_name = {tool.name: tool for tool in tools}
-    agent = create_model().bind_tools(tools)
+    model = create_model()
+    agent = model.bind_tools(tools)
     messages = [
         SystemMessage(content=VERIFIER_PROMPT),
         HumanMessage(
@@ -300,7 +331,7 @@ def verifier_node(state: ByteGraphState) -> dict:
         ),
     ]
     final_response = None
-    for _ in range(10):
+    for _ in range(MAX_VERIFIER_TOOL_STEPS):
         response = agent.invoke(messages)
         messages.append(response)
         if not response.tool_calls:
@@ -316,11 +347,32 @@ def verifier_node(state: ByteGraphState) -> dict:
                 )
             )
     if final_response is None:
-        raise RuntimeError("Verifier exceeded the 10-step tool-call limit")
+        messages.append(
+            HumanMessage(
+                content=(
+                    "Tool inspection is complete. Do not request more tools. "
+                    "Return the final JSON verdict now."
+                )
+            )
+        )
+        final_response = model.invoke(messages)
 
-    verdict = VerifierOutput.model_validate(
-        _parse_json_content(final_response.content)
-    )
+    try:
+        verdict = VerifierOutput.model_validate(
+            _parse_json_content(final_response.content)
+        )
+    except ValueError as exc:
+        verdict = VerifierOutput(
+            passed=False,
+            reason=(
+                "Verifier returned an invalid final verdict: "
+                f"{type(exc).__name__}"
+            ),
+            checks=[],
+            recommended_next_instruction=(
+                "Re-run verification and return the required JSON verdict."
+            ),
+        )
     commands_passed = all(result["ok"] for result in verification_results)
     passed = verdict.passed and commands_passed
 
@@ -373,4 +425,3 @@ def final_node(state: ByteGraphState) -> dict:
     if not state.get("passed") and state.get("last_error"):
         lines.extend(["", "Last error:", state["last_error"]])
     return {"final_answer": "\n".join(lines)}
-
