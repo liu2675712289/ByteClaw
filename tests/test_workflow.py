@@ -6,9 +6,8 @@ from byteclaw.graph.workflow import build_workflow
 from byteclaw.prompts.stage2 import (
     ACTOR_PROMPT,
     FINAL_PROMPT,
-    PLANNER_PROMPT,
-    VERIFIER_PROMPT,
 )
+from byteclaw.prompts.stage3 import PLANNER_PROMPT, VERIFIER_PROMPT
 
 
 class WorkflowTests(unittest.TestCase):
@@ -18,7 +17,7 @@ class WorkflowTests(unittest.TestCase):
                 "passed": True,
                 "attempts": 1,
                 "max_attempts": 3,
-                "last_actor_summary": "Created and tested index.html",
+                "code_agent_summary": "Created and tested index.html",
             }
         )
         failed = final_node(
@@ -47,29 +46,28 @@ class WorkflowTests(unittest.TestCase):
                 "verification_commands": [],
             }
 
-        def actor(state):
-            calls.append("actor")
-            return {"last_actor_summary": "Done"}
-
         def verifier(state):
             calls.append("verifier")
             return {"passed": True, "attempts": 1}
 
         with (
             patch("byteclaw.graph.workflow.planner_node", planner),
-            patch("byteclaw.graph.workflow.actor_node", actor),
             patch("byteclaw.graph.workflow.verifier_node", verifier),
         ):
             workflow = build_workflow()
             result = workflow.invoke({"task": "Build", "max_attempts": 3})
 
-        self.assertEqual(calls, ["planner", "actor", "verifier"])
+        self.assertEqual(calls, ["planner", "verifier"])
         self.assertIn("Status: PASSED", result["final_answer"])
 
-    def test_stage2_prompts_define_each_role_and_json_contract(self) -> None:
-        self.assertIn("plan_summary", PLANNER_PROMPT)
+    def test_stage3_planner_prompt_defines_supervisor_tools(self) -> None:
+        self.assertIn("planner/supervisor", PLANNER_PROMPT)
+        self.assertIn("CallSearchAgentTool", PLANNER_PROMPT)
+        self.assertIn("CallCodeAgentTool", PLANNER_PROMPT)
+        self.assertIn("Always call TodoWriteTool", PLANNER_PROMPT)
         self.assertIn("TodoUpdateTool", ACTOR_PROMPT)
         self.assertIn("recommended_next_instruction", VERIFIER_PROMPT)
+        self.assertIn("Check the actual workspace", VERIFIER_PROMPT)
         self.assertIn("passed or failed", FINAL_PROMPT)
 
 

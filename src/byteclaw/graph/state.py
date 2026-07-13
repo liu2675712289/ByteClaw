@@ -15,6 +15,20 @@ class TodoItem(TypedDict):
     note: str
 
 
+class SourceItem(TypedDict, total=False):
+    title: str
+    url: str
+    content: str
+    score: float | None
+
+
+class AgentHandoff(TypedDict, total=False):
+    from_agent: str
+    to_agent: str
+    instruction: str
+    result: str
+
+
 class VerificationResult(TypedDict):
     command: str
     ok: bool
@@ -43,5 +57,9 @@ class ByteGraphState(TypedDict, total=False):
     attempts: int
     max_attempts: int
     last_actor_summary: str
+    research_notes: str
+    sources: list[SourceItem]
+    agent_handoffs: list[AgentHandoff]
+    code_agent_summary: str
     last_error: str
     final_answer: str

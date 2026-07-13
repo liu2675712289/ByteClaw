@@ -1,4 +1,4 @@
-"""Core planner, actor, and verifier nodes for the ByteClaw graph."""
+"""Core planner, specialist-supervisor, and verifier nodes."""
 
 import json
 import re
@@ -11,12 +11,19 @@ from langgraph.config import get_stream_writer
 from pydantic import BaseModel
 
 from byteclaw.core.state import RuntimeState
-from byteclaw.graph.state import ByteGraphState, TodoItem, VerificationResult
-from byteclaw.prompts.stage2 import ACTOR_PROMPT, PLANNER_PROMPT, VERIFIER_PROMPT
+from byteclaw.graph.state import (
+    ByteGraphState,
+    SourceItem,
+    TodoItem,
+    VerificationResult,
+)
+from byteclaw.prompts.stage2 import ACTOR_PROMPT
+from byteclaw.prompts.stage3 import PLANNER_PROMPT, VERIFIER_PROMPT
 from byteclaw.providers.openai_provider import create_model
 from byteclaw.tools.registry import build_read_only_tools, build_tools
 
 TodoStatus = Literal["pending", "in_progress", "completed", "blocked"]
+MAX_PLANNER_STEPS = 10
 MAX_ACTOR_STEPS = 25
 MAX_VERIFIER_TOOL_STEPS = 10
 
@@ -48,6 +55,18 @@ class TodoUpdateTool(BaseModel):
     id: str
     status: TodoStatus
     note: str = ""
+
+
+class CallSearchAgentTool(BaseModel):
+    """Delegate a research instruction to searchAgent."""
+
+    instruction: str
+
+
+class CallCodeAgentTool(BaseModel):
+    """Delegate an implementation instruction to codeAgent."""
+
+    instruction: str
 
 
 class VerificationCheckOutput(BaseModel):
@@ -85,13 +104,6 @@ def _parse_json_content(content: Any) -> dict[str, Any]:
     return value
 
 
-def _tool_payload(response: Any, tool_type: type[BaseModel]) -> dict[str, Any]:
-    for call in response.tool_calls:
-        if call["name"] == tool_type.__name__:
-            return call["args"]
-    return _parse_json_content(response.content)
-
-
 def _execute_tool(call: dict, tools_by_name: dict[str, Any]) -> Any:
     tool = tools_by_name.get(call["name"])
     if tool is None:
@@ -126,11 +138,132 @@ def _workspace_relative_commands(commands: list[str]) -> list[str]:
     return [command for command in normalized if command]
 
 
-def planner_node(state: ByteGraphState) -> dict:
-    """Create an initial plan or revise it after failed verification."""
+def run_search_agent(
+    state: dict, instruction: str, *, writer: Any = None
+) -> dict:
+    """Load and run searchAgent without creating an import cycle."""
 
-    if state.get("todos") and not state.get("last_error"):
-        return _plan_fields(state)
+    from byteclaw.agents.search_agent import run_search_agent as agent_runner
+
+    return agent_runner(state, instruction, writer=writer)
+
+
+def run_code_agent(
+    state: dict, instruction: str, *, writer: Any = None
+) -> dict:
+    """Load and run codeAgent without creating an import cycle."""
+
+    from byteclaw.agents.code_agent import run_code_agent as agent_runner
+
+    return agent_runner(state, instruction, writer=writer)
+
+
+def _result_summary(result: dict) -> str:
+    summary = result.get("summary") or result.get("error") or ""
+    return _content_to_text(summary)
+
+
+def _normalized_sources(items: Any) -> list[SourceItem]:
+    sources: list[SourceItem] = []
+    if not isinstance(items, list):
+        return sources
+    for item in items:
+        if isinstance(item, str):
+            source: SourceItem = {"url": item}
+        elif isinstance(item, dict):
+            source = dict(item)
+        else:
+            continue
+        if source and source not in sources:
+            sources.append(source)
+    return sources
+
+
+def _append_handoff(
+    state: ByteGraphState,
+    *,
+    to_agent: str,
+    instruction: str,
+    result: dict,
+) -> None:
+    handoffs = [dict(item) for item in state.get("agent_handoffs", [])]
+    handoffs.append(
+        {
+            "from_agent": "planner",
+            "to_agent": to_agent,
+            "instruction": instruction,
+            "result": _result_summary(result),
+        }
+    )
+    state["agent_handoffs"] = handoffs
+
+
+def _call_search_agent_tool(
+    state: ByteGraphState, writer: Any, instruction: str
+) -> dict:
+    writer(
+        {
+            "type": "handoff",
+            "from": "planner",
+            "to": "searchAgent",
+            "instruction": instruction,
+        }
+    )
+    result = run_search_agent(state, instruction, writer=writer)
+
+    existing_notes = state.get("research_notes", "")
+    if isinstance(existing_notes, list):
+        existing_notes = "\n\n".join(str(item) for item in existing_notes)
+    summary = _result_summary(result)
+    if summary and summary not in existing_notes:
+        state["research_notes"] = "\n\n".join(
+            item for item in (existing_notes, summary) if item
+        )
+    else:
+        state["research_notes"] = existing_notes
+
+    state["sources"] = _normalized_sources(
+        [*state.get("sources", []), *result.get("sources", [])]
+    )
+    _append_handoff(
+        state,
+        to_agent="searchAgent",
+        instruction=instruction,
+        result=result,
+    )
+    return result
+
+
+def _call_code_agent_tool(
+    state: ByteGraphState, writer: Any, instruction: str
+) -> dict:
+    writer(
+        {
+            "type": "handoff",
+            "from": "planner",
+            "to": "codeAgent",
+            "instruction": instruction,
+        }
+    )
+    result = run_code_agent(state, instruction, writer=writer)
+
+    state["todos"] = result.get("todos", state.get("todos", []))
+    state["code_agent_summary"] = _result_summary(result)
+    state["messages"] = [
+        *state.get("messages", []),
+        *result.get("messages", []),
+    ]
+    _append_handoff(
+        state,
+        to_agent="codeAgent",
+        instruction=instruction,
+        result=result,
+    )
+    return result
+
+
+def planner_node(state: ByteGraphState) -> dict:
+    """Plan work and supervise searchAgent and codeAgent through tools."""
 
     if state.get("todos"):
         request = {
@@ -145,20 +278,100 @@ def planner_node(state: ByteGraphState) -> dict:
             "instruction": "Create the initial implementation plan.",
         }
 
-    model = create_model().bind_tools([TodoWriteTool])
-    response = model.invoke(
-        [
-            SystemMessage(content=PLANNER_PROMPT),
-            HumanMessage(content=json.dumps(request, ensure_ascii=False, default=str)),
-        ]
-    )
-    plan = TodoWriteTool.model_validate(
-        _tool_payload(response, TodoWriteTool)
-    ).model_dump()
-    plan["verification_commands"] = _workspace_relative_commands(
-        plan["verification_commands"]
-    )
-    return plan
+    tools = [TodoWriteTool, CallSearchAgentTool, CallCodeAgentTool]
+    agent = create_model().bind_tools(tools)
+    writer = _event_writer()
+    working_state: ByteGraphState = dict(state)
+    initial_message_count = len(state.get("messages", []))
+    messages = [
+        SystemMessage(content=PLANNER_PROMPT),
+        HumanMessage(
+            content=json.dumps(request, ensure_ascii=False, default=str)
+        ),
+    ]
+    completed = False
+
+    for _ in range(MAX_PLANNER_STEPS):
+        response = agent.invoke(messages)
+        messages.append(response)
+        writer({"type": "ai_message", "content": response.content})
+        if not response.tool_calls:
+            writer(
+                {
+                    "type": "final_answer",
+                    "content": _content_to_text(response.content),
+                }
+            )
+            completed = True
+            break
+
+        for call in response.tool_calls:
+            name = call["name"]
+            writer({"type": "tool_call", "name": name, "args": call["args"]})
+            try:
+                if name == TodoWriteTool.__name__:
+                    result = TodoWriteTool.model_validate(
+                        call["args"]
+                    ).model_dump()
+                    result["verification_commands"] = (
+                        _workspace_relative_commands(
+                            result["verification_commands"]
+                        )
+                    )
+                    working_state.update(result)
+                elif name == CallSearchAgentTool.__name__:
+                    instruction = CallSearchAgentTool.model_validate(
+                        call["args"]
+                    ).instruction
+                    result = _call_search_agent_tool(
+                        working_state, writer, instruction
+                    )
+                elif name == CallCodeAgentTool.__name__:
+                    instruction = CallCodeAgentTool.model_validate(
+                        call["args"]
+                    ).instruction
+                    result = _call_code_agent_tool(
+                        working_state, writer, instruction
+                    )
+                else:
+                    result = {"error": f"Unknown tool: {name}"}
+            except Exception as exc:
+                result = {"error": f"{type(exc).__name__}: {exc}"}
+
+            messages.append(
+                ToolMessage(
+                    content=json.dumps(
+                        result, ensure_ascii=False, default=str
+                    ),
+                    tool_call_id=call["id"],
+                    name=name,
+                )
+            )
+            writer({"type": "tool_result", "name": name, "result": result})
+
+    if not completed:
+        writer(
+            {
+                "type": "final_answer",
+                "content": (
+                    f"Planner reached the {MAX_PLANNER_STEPS}-step limit."
+                ),
+            }
+        )
+
+    update = _plan_fields(working_state)
+    for field in (
+        "research_notes",
+        "sources",
+        "agent_handoffs",
+        "code_agent_summary",
+    ):
+        if field in working_state:
+            update[field] = working_state[field]
+    new_messages = working_state.get("messages", [])[initial_message_count:]
+    if new_messages:
+        update["messages"] = new_messages
+    return update
 
 
 def _update_todo(todos: list[TodoItem], args: dict) -> tuple[list[TodoItem], Any]:
@@ -317,7 +530,7 @@ def verifier_node(state: ByteGraphState) -> dict:
         "acceptance_criteria": state.get("acceptance_criteria", []),
         "verification_commands": state.get("verification_commands", []),
         "verification_results": verification_results,
-        "last_actor_summary": state.get("last_actor_summary", ""),
+        "code_agent_summary": state.get("code_agent_summary", ""),
     }
 
     tools = build_read_only_tools(runtime)
@@ -420,8 +633,11 @@ def final_node(state: ByteGraphState) -> dict:
         f"Status: {status}",
         f"Attempts: {state.get('attempts', 0)}/{state.get('max_attempts', 0)}",
     ]
-    if state.get("last_actor_summary"):
-        lines.extend(["", "Actor summary:", state["last_actor_summary"]])
+    summary = state.get("code_agent_summary") or state.get(
+        "last_actor_summary", ""
+    )
+    if summary:
+        lines.extend(["", "Code agent summary:", summary])
     if not state.get("passed") and state.get("last_error"):
         lines.extend(["", "Last error:", state["last_error"]])
     return {"final_answer": "\n".join(lines)}

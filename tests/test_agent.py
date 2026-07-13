@@ -14,7 +14,6 @@ class FakeWorkflow:
         self.calls.append((inputs, stream_mode))
         yield "updates", {"planner": {"plan_summary": "Create a page"}}
         yield "custom", {"type": "tool_call", "name": "file_write"}
-        yield "updates", {"actor": {"last_actor_summary": "Created page"}}
         yield "updates", {"verifier": {"passed": True, "attempts": 1}}
         yield "updates", {"final": {"final_answer": "Status: PASSED"}}
 
@@ -53,13 +52,8 @@ class AgentTests(unittest.TestCase):
                 },
                 {
                     "type": "node_output",
-                    "node": "actor",
+                    "node": "planner",
                     "output": {"type": "tool_call", "name": "file_write"},
-                },
-                {
-                    "type": "node_output",
-                    "node": "actor",
-                    "output": {"last_actor_summary": "Created page"},
                 },
                 {
                     "type": "node_output",

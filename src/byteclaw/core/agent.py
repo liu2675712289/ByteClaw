@@ -27,7 +27,7 @@ def stream_agent_events(
         inputs, stream_mode=["updates", "custom"]
     ):
         if stream_mode == "custom":
-            yield {"type": "node_output", "node": "actor", "output": payload}
+            yield {"type": "node_output", "node": "planner", "output": payload}
             continue
 
         for node, output in payload.items():

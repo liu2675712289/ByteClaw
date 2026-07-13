@@ -9,8 +9,12 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from byteclaw.core.state import RuntimeState
 from byteclaw.graph.nodes import (
+    CallCodeAgentTool,
+    CallSearchAgentTool,
     TodoUpdateTool,
     TodoWriteTool,
+    _call_code_agent_tool,
+    _call_search_agent_tool,
     actor_node,
     planner_node,
     verifier_node,
@@ -54,7 +58,7 @@ class FakeModel:
 
 class GraphNodeTests(unittest.TestCase):
     def test_planner_creates_structured_plan(self) -> None:
-        response = AIMessage(
+        plan_response = AIMessage(
             content="",
             tool_calls=[
                 {
@@ -76,26 +80,83 @@ class GraphNodeTests(unittest.TestCase):
                     },
                     "id": "plan-1",
                     "type": "tool_call",
-                }
+                },
+                {
+                    "name": "CallSearchAgentTool",
+                    "args": {"instruction": "Find official guidance"},
+                    "id": "search-1",
+                    "type": "tool_call",
+                },
+                {
+                    "name": "CallCodeAgentTool",
+                    "args": {"instruction": "Implement the plan"},
+                    "id": "code-1",
+                    "type": "tool_call",
+                },
             ],
         )
-        agent = FakeAgent([response])
+        agent = FakeAgent(
+            [plan_response, AIMessage(content="Implementation delegated.")]
+        )
         model = FakeModel(agent)
+        code_message = AIMessage(content="Implemented index.html")
 
-        with patch("byteclaw.graph.nodes.create_model", return_value=model):
+        with (
+            patch("byteclaw.graph.nodes.create_model", return_value=model),
+            patch(
+                "byteclaw.graph.nodes.run_search_agent",
+                return_value={
+                    "ok": True,
+                    "summary": "Official guidance",
+                    "sources": ["https://example.com/docs"],
+                },
+            ),
+            patch(
+                "byteclaw.graph.nodes.run_code_agent",
+                return_value={
+                    "ok": True,
+                    "summary": "Implemented index.html",
+                    "todos": [
+                        {
+                            "id": "1",
+                            "content": "Create index.html",
+                            "status": "completed",
+                            "note": "Done",
+                        }
+                    ],
+                    "messages": [code_message],
+                },
+            ),
+        ):
             update = planner_node({"task": "Build a page"})
 
         self.assertEqual(update["plan_summary"], "Build and test the page")
-        self.assertEqual(update["todos"][0]["status"], "pending")
+        self.assertEqual(update["todos"][0]["status"], "completed")
         self.assertEqual(
             update["verification_commands"], ["python -m unittest"]
         )
-        self.assertEqual(model.bound_tools, [TodoWriteTool])
+        self.assertEqual(
+            model.bound_tools,
+            [TodoWriteTool, CallSearchAgentTool, CallCodeAgentTool],
+        )
+        self.assertEqual(update["research_notes"], "Official guidance")
+        self.assertEqual(
+            update["sources"], [{"url": "https://example.com/docs"}]
+        )
+        self.assertEqual(update["code_agent_summary"], "Implemented index.html")
+        self.assertEqual(update["messages"], [code_message])
+        self.assertEqual(
+            [item["to_agent"] for item in update["agent_handoffs"]],
+            ["searchAgent", "codeAgent"],
+        )
 
     def test_planner_revises_failed_plan(self) -> None:
         response = AIMessage(
-            content=json.dumps(
+            content="",
+            tool_calls=[
                 {
+                    "name": "TodoWriteTool",
+                    "args": {
                     "plan_summary": "Revised plan",
                     "todos": [
                         {
@@ -107,14 +168,41 @@ class GraphNodeTests(unittest.TestCase):
                     ],
                     "acceptance_criteria": ["Tests pass"],
                     "verification_commands": ["python -m unittest"],
-                }
-            )
+                    },
+                    "id": "plan-1",
+                    "type": "tool_call",
+                },
+                {
+                    "name": "CallCodeAgentTool",
+                    "args": {"instruction": "Fix only the failing test"},
+                    "id": "code-1",
+                    "type": "tool_call",
+                },
+            ],
         )
-        agent = FakeAgent([response])
+        agent = FakeAgent([response, AIMessage(content="Fix delegated.")])
 
-        with patch(
-            "byteclaw.graph.nodes.create_model",
-            return_value=FakeModel(agent),
+        with (
+            patch(
+                "byteclaw.graph.nodes.create_model",
+                return_value=FakeModel(agent),
+            ),
+            patch(
+                "byteclaw.graph.nodes.run_code_agent",
+                return_value={
+                    "ok": True,
+                    "summary": "Fixed the failing test",
+                    "todos": [
+                        {
+                            "id": "1",
+                            "content": "Fix test",
+                            "status": "completed",
+                            "note": "Done",
+                        }
+                    ],
+                    "messages": [],
+                },
+            ) as code_agent,
         ):
             update = planner_node(
                 {
@@ -134,6 +222,66 @@ class GraphNodeTests(unittest.TestCase):
         prompt = agent.message_snapshots[0][-1].content
         self.assertIn("Tests failed", prompt)
         self.assertEqual(update["plan_summary"], "Revised plan")
+        code_agent.assert_called_once()
+        self.assertEqual(
+            code_agent.call_args.args[1], "Fix only the failing test"
+        )
+
+    def test_specialist_tool_helpers_update_handoff_state(self) -> None:
+        state = {
+            "research_notes": "Existing note",
+            "sources": [{"url": "https://example.com/existing"}],
+            "todos": [],
+            "messages": [],
+        }
+        code_message = AIMessage(content="Code work")
+        events: list[dict] = []
+
+        with (
+            patch(
+                "byteclaw.graph.nodes.run_search_agent",
+                return_value={
+                    "summary": "New research",
+                    "sources": [
+                        "https://example.com/existing",
+                        "https://example.com/new",
+                    ],
+                },
+            ),
+            patch(
+                "byteclaw.graph.nodes.run_code_agent",
+                return_value={
+                    "summary": "Implemented",
+                    "todos": [
+                        {
+                            "id": "1",
+                            "content": "Implement",
+                            "status": "completed",
+                            "note": "Done",
+                        }
+                    ],
+                    "messages": [code_message],
+                },
+            ),
+        ):
+            _call_search_agent_tool(state, events.append, "Research")
+            _call_code_agent_tool(state, events.append, "Implement")
+
+        self.assertEqual(state["research_notes"], "Existing note\n\nNew research")
+        self.assertEqual(
+            state["sources"],
+            [
+                {"url": "https://example.com/existing"},
+                {"url": "https://example.com/new"},
+            ],
+        )
+        self.assertEqual(state["todos"][0]["status"], "completed")
+        self.assertEqual(state["code_agent_summary"], "Implemented")
+        self.assertEqual(state["messages"], [code_message])
+        self.assertEqual(
+            [event["to"] for event in events if event["type"] == "handoff"],
+            ["searchAgent", "codeAgent"],
+        )
 
     def test_actor_streams_events_and_updates_todo(self) -> None:
         file_tool = FakeTool("file_write", "Wrote index.html")

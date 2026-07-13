@@ -57,7 +57,7 @@ def main(
         int,
         typer.Option(
             "--max-attempts",
-            help="Maximum planner-actor-verifier attempts.",
+            help="Maximum planner-verifier attempts.",
             min=1,
         ),
     ] = 3,

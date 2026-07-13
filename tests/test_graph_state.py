@@ -4,7 +4,13 @@ from typing import Annotated, get_args, get_origin, get_type_hints
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
-from byteclaw.graph.state import ByteGraphState, TodoItem, VerificationResult
+from byteclaw.graph.state import (
+    AgentHandoff,
+    ByteGraphState,
+    SourceItem,
+    TodoItem,
+    VerificationResult,
+)
 
 
 class GraphStateTests(unittest.TestCase):
@@ -30,6 +36,22 @@ class GraphStateTests(unittest.TestCase):
             VerificationResult.__required_keys__,
             frozenset({"command", "ok", "exit_code", "stdout", "stderr"}),
         )
+        self.assertFalse(AgentHandoff.__total__)
+        self.assertEqual(
+            AgentHandoff.__optional_keys__,
+            frozenset({"from_agent", "to_agent", "instruction", "result"}),
+        )
+        self.assertFalse(SourceItem.__total__)
+
+    def test_stage3_state_fields_are_declared(self) -> None:
+        annotations = get_type_hints(ByteGraphState, include_extras=True)
+
+        self.assertIs(annotations["research_notes"], str)
+        self.assertEqual(get_args(annotations["sources"]), (SourceItem,))
+        self.assertEqual(
+            get_args(annotations["agent_handoffs"]), (AgentHandoff,)
+        )
+        self.assertIs(annotations["code_agent_summary"], str)
 
 
 if __name__ == "__main__":
