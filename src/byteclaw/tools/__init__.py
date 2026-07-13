@@ -3,7 +3,7 @@
 from byteclaw.tools.bash_tool import BashTool
 from byteclaw.tools.file_tools import FileEditTool, FileReadTool, FileWriteTool
 from byteclaw.tools.grep_tool import GrepTool
-from byteclaw.tools.registry import build_tools
+from byteclaw.tools.registry import build_read_only_tools, build_tools
 
 __all__ = [
     "BashTool",
@@ -11,6 +11,6 @@ __all__ = [
     "FileReadTool",
     "FileWriteTool",
     "GrepTool",
+    "build_read_only_tools",
     "build_tools",
 ]
-

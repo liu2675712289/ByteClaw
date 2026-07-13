@@ -1,96 +1,77 @@
-import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from langchain_core.messages import AIMessage, ToolMessage
-
-from byteclaw.core.agent import ACTOR_PROMPT, stream_agent_events
+from byteclaw.core.agent import stream_agent_events
 
 
-class FakeTool:
-    name = "file_write"
-
+class FakeWorkflow:
     def __init__(self) -> None:
-        self.calls: list[dict] = []
+        self.calls: list[tuple[dict, list[str]]] = []
 
-    def invoke(self, args: dict) -> dict:
-        self.calls.append(args)
-        return {"written": args["file_path"]}
-
-
-class FakeAgent:
-    def __init__(self) -> None:
-        self.responses = [
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "file_write",
-                        "args": {"file_path": "index.html", "content": "hello"},
-                        "id": "call-1",
-                        "type": "tool_call",
-                    }
-                ],
-            ),
-            AIMessage(content="Created index.html"),
-        ]
-        self.message_snapshots: list[list] = []
-
-    def invoke(self, messages: list):
-        self.message_snapshots.append(list(messages))
-        return self.responses.pop(0)
-
-
-class FakeModel:
-    def __init__(self, agent: FakeAgent) -> None:
-        self.agent = agent
-        self.bound_tools = None
-
-    def bind_tools(self, tools: list):
-        self.bound_tools = tools
-        return self.agent
+    def stream(self, inputs: dict, *, stream_mode: list[str]):
+        self.calls.append((inputs, stream_mode))
+        yield "updates", {"planner": {"plan_summary": "Create a page"}}
+        yield "custom", {"type": "tool_call", "name": "file_write"}
+        yield "updates", {"actor": {"last_actor_summary": "Created page"}}
+        yield "updates", {"verifier": {"passed": True, "attempts": 1}}
+        yield "updates", {"final": {"final_answer": "Status: PASSED"}}
 
 
 class AgentTests(unittest.TestCase):
-    def test_stream_agent_events_runs_tool_and_returns_final_answer(self) -> None:
-        tool = FakeTool()
-        agent = FakeAgent()
-        model = FakeModel(agent)
+    def test_stream_agent_events_normalizes_workflow_events(self) -> None:
+        workflow = FakeWorkflow()
 
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir) / "workspace"
-            with (
-                patch("byteclaw.core.agent.build_tools", return_value=[tool]) as build,
-                patch("byteclaw.core.agent.create_model", return_value=model),
-            ):
+            with patch(
+                "byteclaw.core.agent.build_workflow", return_value=workflow
+            ) as build:
                 events = list(
-                    stream_agent_events("create a page", workspace=workspace)
+                    stream_agent_events(
+                        "create a page",
+                        workspace=workspace,
+                        max_attempts=5,
+                    )
                 )
-                state = build.call_args.args[0]
-                self.assertTrue(state.workspace.is_dir())
 
+            inputs, stream_modes = workflow.calls[0]
+            self.assertTrue(inputs["runtime"].workspace.is_dir())
+
+        build.assert_called_once_with()
+        self.assertEqual(inputs["task"], "create a page")
+        self.assertEqual(inputs["max_attempts"], 5)
+        self.assertEqual(stream_modes, ["updates", "custom"])
         self.assertEqual(
-            [event["type"] for event in events],
+            events,
             [
-                "ai_message",
-                "tool_call",
-                "tool_result",
-                "ai_message",
-                "final_answer",
+                {
+                    "type": "node_output",
+                    "node": "planner",
+                    "output": {"plan_summary": "Create a page"},
+                },
+                {
+                    "type": "node_output",
+                    "node": "actor",
+                    "output": {"type": "tool_call", "name": "file_write"},
+                },
+                {
+                    "type": "node_output",
+                    "node": "actor",
+                    "output": {"last_actor_summary": "Created page"},
+                },
+                {
+                    "type": "node_output",
+                    "node": "verifier",
+                    "output": {"passed": True, "attempts": 1},
+                },
+                {
+                    "type": "node_output",
+                    "node": "final",
+                    "output": {"final_answer": "Status: PASSED"},
+                },
             ],
-        )
-        self.assertEqual(events[-1]["content"], "Created index.html")
-        self.assertEqual(tool.calls[0]["file_path"], "index.html")
-        self.assertEqual(model.bound_tools, [tool])
-
-        self.assertEqual(agent.message_snapshots[0][0].content, ACTOR_PROMPT)
-        tool_message = agent.message_snapshots[1][-1]
-        self.assertIsInstance(tool_message, ToolMessage)
-        self.assertEqual(tool_message.tool_call_id, "call-1")
-        self.assertEqual(
-            json.loads(tool_message.content), {"written": "index.html"}
         )
 
 

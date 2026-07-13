@@ -11,7 +11,7 @@ from byteclaw.core.state import RuntimeState
 from byteclaw.tools.bash_tool import BashTool
 from byteclaw.tools.file_tools import FileEditTool, FileReadTool, FileWriteTool
 from byteclaw.tools.grep_tool import GrepTool
-from byteclaw.tools.registry import build_tools
+from byteclaw.tools.registry import build_read_only_tools, build_tools
 
 
 class ToolTests(unittest.TestCase):
@@ -74,6 +74,10 @@ class ToolTests(unittest.TestCase):
             ["file_read", "file_write", "file_edit", "grep", "bash"],
         )
         self.assertTrue(all(tool.__class__.__name__ == "StructuredTool" for tool in tools))
+
+    def test_read_only_registry_excludes_mutating_tools(self) -> None:
+        tools = build_read_only_tools(self.state)
+        self.assertEqual([tool.name for tool in tools], ["file_read", "grep"])
 
 
 if __name__ == "__main__":

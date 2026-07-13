@@ -38,3 +38,20 @@ def build_tools(state: RuntimeState) -> list[StructuredTool]:
             description="Run a shell command with the workspace as its working directory.",
         ),
     ]
+
+
+def build_read_only_tools(state: RuntimeState) -> list[StructuredTool]:
+    """Build workspace tools that cannot modify files or run commands."""
+
+    return [
+        StructuredTool.from_function(
+            func=FileReadTool(state).__call__,
+            name="file_read",
+            description="Read a range of lines from a UTF-8 file in the workspace.",
+        ),
+        StructuredTool.from_function(
+            func=GrepTool(state).__call__,
+            name="grep",
+            description="Search workspace text files using a regular expression.",
+        ),
+    ]

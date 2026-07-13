@@ -17,17 +17,27 @@ console = Console()
 def _render_event(event: dict) -> None:
     """Render one agent event to the terminal."""
 
-    event_type = event["type"]
-    if event_type == "tool_call":
-        console.print(f"[bold cyan]Tool call:[/] {event['name']}")
-        console.print(Pretty(event["args"]))
-    elif event_type == "tool_result":
-        console.print(f"[bold green]Tool result:[/] {event['name']}")
-        console.print(Pretty(event["result"]))
-    elif event_type == "final_answer":
-        console.print(
-            Panel(str(event["content"]), title="ByteClaw", border_style="green")
+    node = event["node"]
+    output = event["output"]
+
+    if node == "planner":
+        console.print("[bold blue]📋 Planner[/]")
+        console.print(Pretty(output))
+    elif node == "actor":
+        console.print("[bold cyan]🔧 Actor[/]")
+        console.print(Pretty(output))
+    elif node == "verifier":
+        passed = isinstance(output, dict) and output.get("passed") is True
+        label = "✅ Verifier" if passed else "❌ Verifier"
+        console.print(f"[bold]{label}[/]")
+        console.print(Pretty(output))
+    elif node == "final":
+        content = (
+            output.get("final_answer", output)
+            if isinstance(output, dict)
+            else output
         )
+        console.print(Panel(str(content), title="📝 Final", border_style="green"))
 
 
 @app.command()
@@ -43,8 +53,18 @@ def main(
             dir_okay=True,
         ),
     ] = Path("workspace"),
+    max_attempts: Annotated[
+        int,
+        typer.Option(
+            "--max-attempts",
+            help="Maximum planner-actor-verifier attempts.",
+            min=1,
+        ),
+    ] = 3,
 ) -> None:
     """Run ByteClaw on TASK inside a workspace."""
 
-    for event in stream_agent_events(task, workspace=workspace):
+    for event in stream_agent_events(
+        task, workspace=workspace, max_attempts=max_attempts
+    ):
         _render_event(event)
