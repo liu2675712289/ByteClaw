@@ -13,6 +13,7 @@ class RuntimeState:
     """
 
     workspace: Path
+    checkpoint_mode: str = "light"
 
     def __post_init__(self) -> None:
         workspace = self.workspace.expanduser().resolve()

@@ -23,6 +23,7 @@ from byteclaw.graph.memory import (
     _trim_handoffs,
     build_layered_memory,
     format_layered_memory_for_prompt,
+    memory_event,
 )
 from byteclaw.graph.state import (
     ByteGraphState,
@@ -276,9 +277,7 @@ def _call_code_agent_tool(
     return result
 
 
-def planner_node(state: ByteGraphState) -> dict:
-    """Plan work and supervise searchAgent and codeAgent through tools."""
-
+def _planner_input(state: ByteGraphState, memory: dict) -> str:
     if state.get("todos"):
         request = {
             "task": state.get("task", ""),
@@ -291,17 +290,27 @@ def planner_node(state: ByteGraphState) -> dict:
             "task": state.get("task", ""),
             "instruction": "Create the initial implementation plan.",
         }
+    return (
+        f"{json.dumps(request, ensure_ascii=False, default=str)}"
+        "\n\nLayered memory:\n"
+        f"{format_layered_memory_for_prompt(memory)}"
+    )
+
+
+def planner_node(state: ByteGraphState) -> dict:
+    """Plan work and supervise searchAgent and codeAgent through tools."""
 
     tools = [TodoWriteTool, CallSearchAgentTool, CallCodeAgentTool]
     agent = create_model().bind_tools(tools)
     writer = _event_writer()
     working_state: ByteGraphState = dict(state)
     initial_message_count = len(state.get("messages", []))
+    memory = build_layered_memory(working_state, node="planner")
+    working_state["memory_snapshot"] = memory
+    writer(memory_event(memory, node="planner"))
     messages = [
         SystemMessage(content=PLANNER_PROMPT),
-        HumanMessage(
-            content=json.dumps(request, ensure_ascii=False, default=str)
-        ),
+        HumanMessage(content=_planner_input(working_state, memory)),
     ]
     completed = False
 
@@ -379,6 +388,7 @@ def planner_node(state: ByteGraphState) -> dict:
         "sources",
         "agent_handoffs",
         "code_agent_summary",
+        "memory_snapshot",
     ):
         if field in working_state:
             update[field] = working_state[field]
@@ -530,14 +540,11 @@ def _verified_todos(
     return updated
 
 
-def verifier_node(state: ByteGraphState) -> dict:
-    """Run verification commands and independently assess acceptance criteria."""
-
-    runtime: RuntimeState = state["runtime"]
-    verification_results = [
-        _run_verification_command(command, runtime.workspace)
-        for command in state.get("verification_commands", [])
-    ]
+def _verifier_input(
+    state: ByteGraphState,
+    verification_results: list[VerificationResult],
+    memory: dict,
+) -> str:
     verifier_context = {
         "task": state.get("task", ""),
         "plan_summary": state.get("plan_summary", ""),
@@ -547,6 +554,24 @@ def verifier_node(state: ByteGraphState) -> dict:
         "verification_results": verification_results,
         "code_agent_summary": state.get("code_agent_summary", ""),
     }
+    return (
+        f"{json.dumps(verifier_context, ensure_ascii=False, default=str)}"
+        "\n\nLayered memory:\n"
+        f"{format_layered_memory_for_prompt(memory)}"
+    )
+
+
+def verifier_node(state: ByteGraphState) -> dict:
+    """Run verification commands and independently assess acceptance criteria."""
+
+    runtime: RuntimeState = state["runtime"]
+    verification_results = [
+        _run_verification_command(command, runtime.workspace)
+        for command in state.get("verification_commands", [])
+    ]
+    memory = build_layered_memory(state, node="verifier")
+    writer = _event_writer()
+    writer(memory_event(memory, node="verifier"))
 
     tools = build_read_only_tools(runtime)
     tools_by_name = {tool.name: tool for tool in tools}
@@ -555,7 +580,7 @@ def verifier_node(state: ByteGraphState) -> dict:
     messages = [
         SystemMessage(content=VERIFIER_PROMPT),
         HumanMessage(
-            content=json.dumps(verifier_context, ensure_ascii=False, default=str)
+            content=_verifier_input(state, verification_results, memory)
         ),
     ]
     final_response = None
@@ -624,6 +649,7 @@ def verifier_node(state: ByteGraphState) -> dict:
         "verification_results": verification_results,
         "verification_checks": [check.model_dump() for check in verdict.checks],
         "todos": _verified_todos(state.get("todos", []), passed, last_error),
+        "memory_snapshot": memory,
     }
     if not passed:
         update["last_error"] = last_error
@@ -770,6 +796,12 @@ def context_compressor_node(state: ByteGraphState) -> dict:
         "history_summary": summary,
         "compression_events": compression_events,
     }
+
+
+def context_compressor_route(state: ByteGraphState) -> str:
+    """Resume at the node selected before context compression."""
+
+    return state.get("context_next_node", "verifier")
 
 
 def verifier_route(state: ByteGraphState) -> str:

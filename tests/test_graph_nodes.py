@@ -23,6 +23,7 @@ from byteclaw.graph.nodes import (
     _call_search_agent_tool,
     actor_node,
     context_compressor_node,
+    context_compressor_route,
     context_monitor_node,
     context_monitor_route,
     planner_node,
@@ -109,9 +110,18 @@ class GraphNodeTests(unittest.TestCase):
         )
         model = FakeModel(agent)
         code_message = AIMessage(content="Implemented index.html")
+        memory = {
+            "rules": {},
+            "working_memory": {"node": "planner"},
+            "history_summary_store": {},
+        }
 
         with (
             patch("byteclaw.graph.nodes.create_model", return_value=model),
+            patch(
+                "byteclaw.graph.nodes.build_layered_memory",
+                return_value=memory,
+            ),
             patch(
                 "byteclaw.graph.nodes.run_search_agent",
                 return_value={
@@ -155,6 +165,10 @@ class GraphNodeTests(unittest.TestCase):
         self.assertEqual(update["code_agent_summary"], "Implemented index.html")
         self.assertEqual(update["messages"], [code_message])
         self.assertEqual(update["context_next_node"], "verifier")
+        self.assertEqual(update["memory_snapshot"], memory)
+        self.assertIn(
+            "Layered memory:", agent.message_snapshots[0][-1].content
+        )
         self.assertEqual(
             [item["to_agent"] for item in update["agent_handoffs"]],
             ["searchAgent", "codeAgent"],
@@ -191,11 +205,20 @@ class GraphNodeTests(unittest.TestCase):
             ],
         )
         agent = FakeAgent([response, AIMessage(content="Fix delegated.")])
+        memory = {
+            "rules": {},
+            "working_memory": {"node": "planner"},
+            "history_summary_store": {},
+        }
 
         with (
             patch(
                 "byteclaw.graph.nodes.create_model",
                 return_value=FakeModel(agent),
+            ),
+            patch(
+                "byteclaw.graph.nodes.build_layered_memory",
+                return_value=memory,
             ),
             patch(
                 "byteclaw.graph.nodes.run_code_agent",
@@ -231,6 +254,7 @@ class GraphNodeTests(unittest.TestCase):
 
         prompt = agent.message_snapshots[0][-1].content
         self.assertIn("Tests failed", prompt)
+        self.assertIn("Layered memory:", prompt)
         self.assertEqual(update["plan_summary"], "Revised plan")
         code_agent.assert_called_once()
         self.assertEqual(
@@ -424,6 +448,7 @@ class GraphNodeTests(unittest.TestCase):
             "recommended_next_instruction": "",
         }
         agent = FakeAgent([AIMessage(content=json.dumps(verdict))])
+        events: list[dict] = []
 
         with tempfile.TemporaryDirectory() as temp_dir:
             command = f'"{sys.executable}" -c "print(123)"'
@@ -446,6 +471,10 @@ class GraphNodeTests(unittest.TestCase):
                     "byteclaw.graph.nodes.create_model",
                     return_value=FakeModel(agent),
                 ),
+                patch(
+                    "byteclaw.graph.nodes.get_stream_writer",
+                    return_value=events.append,
+                ),
             ):
                 update = verifier_node(state)
 
@@ -454,6 +483,15 @@ class GraphNodeTests(unittest.TestCase):
         self.assertEqual(update["verification_results"][0]["exit_code"], 0)
         self.assertIn("123", update["verification_results"][0]["stdout"])
         self.assertEqual(update["todos"][0]["status"], "completed")
+        self.assertEqual(events[0]["type"], "memory")
+        self.assertEqual(events[0]["node"], "verifier")
+        self.assertEqual(
+            update["memory_snapshot"]["working_memory"]["node"],
+            "verifier",
+        )
+        self.assertIn(
+            "Layered memory:", agent.message_snapshots[0][-1].content
+        )
 
     def test_failed_command_overrides_model_pass(self) -> None:
         verdict = {
@@ -557,6 +595,13 @@ class GraphNodeTests(unittest.TestCase):
             "planner",
         )
         self.assertEqual(context_monitor_route({}), "verifier")
+
+    def test_context_compressor_route(self) -> None:
+        self.assertEqual(
+            context_compressor_route({"context_next_node": "planner"}),
+            "planner",
+        )
+        self.assertEqual(context_compressor_route({}), "verifier")
 
     def test_context_compressor_replaces_and_persists_history(self) -> None:
         compressed_payload = {

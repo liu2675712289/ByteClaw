@@ -140,6 +140,7 @@ class CodeAgentTests(unittest.TestCase):
         self.assertEqual(
             [event["type"] for event in update["tool_events"]],
             [
+                "memory",
                 "tool_call",
                 "tool_result",
                 "tool_call",
@@ -154,16 +155,20 @@ class CodeAgentTests(unittest.TestCase):
         self.assertIsInstance(messages[0], SystemMessage)
         self.assertEqual(messages[0].content, CODE_AGENT_PROMPT)
         self.assertIsInstance(messages[1], HumanMessage)
-        request = json.loads(messages[1].content)
+        request_text, memory_text = messages[1].content.split(
+            "\n\nLayered memory:\n", 1
+        )
+        request = json.loads(request_text)
+        prompt_memory = json.loads(memory_text)
         self.assertEqual(request["task"], "Create an example program")
         self.assertEqual(request["instruction"], "Implement the first todo")
         self.assertEqual(request["session_context"], {"attempt": 1})
         self.assertEqual(
-            request["memory"]["working_memory"]["node"], "codeAgent"
+            prompt_memory["working_memory"]["node"], "codeAgent"
         )
-        self.assertEqual(request["memory"], state["memory_snapshot"])
+        self.assertEqual(prompt_memory, state["memory_snapshot"])
         self.assertEqual(
-            request["memory"]["history_summary_store"]["history_exists"],
+            prompt_memory["history_summary_store"]["history_exists"],
             False,
         )
         self.assertEqual(

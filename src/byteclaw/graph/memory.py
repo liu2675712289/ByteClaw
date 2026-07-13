@@ -144,3 +144,9 @@ def format_layered_memory_for_prompt(memory: LayeredMemory) -> str:
     """Format layered memory as readable JSON for model prompts."""
 
     return json.dumps(memory, ensure_ascii=False, indent=2, default=str)
+
+
+def memory_event(memory: LayeredMemory, *, node: str) -> dict[str, Any]:
+    """Return the normalized stream event for one layered-memory snapshot."""
+
+    return {"type": "memory", "node": node, "memory": memory}

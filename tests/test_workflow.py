@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from byteclaw.graph.nodes import final_node
-from byteclaw.graph.workflow import build_workflow
+from byteclaw.graph.workflow import build_complex_workflow, build_workflow
 from byteclaw.prompts.stage2 import (
     ACTOR_PROMPT,
     FINAL_PROMPT,
@@ -44,6 +44,16 @@ class WorkflowTests(unittest.TestCase):
                 "todos": [],
                 "acceptance_criteria": [],
                 "verification_commands": [],
+                "context_next_node": "verifier",
+            }
+
+        def context_monitor(state):
+            calls.append("context_monitor")
+            return {
+                "context_should_compress": False,
+                "context_next_node": state.get(
+                    "context_next_node", "verifier"
+                ),
             }
 
         def verifier(state):
@@ -52,12 +62,83 @@ class WorkflowTests(unittest.TestCase):
 
         with (
             patch("byteclaw.graph.workflow.planner_node", planner),
+            patch(
+                "byteclaw.graph.workflow.context_monitor_node",
+                context_monitor,
+            ),
             patch("byteclaw.graph.workflow.verifier_node", verifier),
         ):
             workflow = build_workflow()
             result = workflow.invoke({"task": "Build", "max_attempts": 3})
 
-        self.assertEqual(calls, ["planner", "verifier"])
+        self.assertEqual(
+            calls,
+            ["planner", "context_monitor", "verifier", "context_monitor"],
+        )
+        self.assertIn("Status: PASSED", result["final_answer"])
+        self.assertEqual(
+            set(workflow.get_graph().nodes),
+            {
+                "__start__",
+                "planner",
+                "context_monitor",
+                "context_compressor",
+                "verifier",
+                "final",
+                "__end__",
+            },
+        )
+
+    def test_complex_workflow_routes_through_compressor(self) -> None:
+        calls: list[str] = []
+
+        def planner(state):
+            calls.append("planner")
+            return {"context_next_node": "verifier"}
+
+        def context_monitor(state):
+            calls.append("context_monitor")
+            return {
+                "context_should_compress": not bool(
+                    state.get("history_summary")
+                )
+            }
+
+        def context_compressor(state):
+            calls.append("context_compressor")
+            return {
+                "history_summary": "compressed",
+                "context_should_compress": False,
+            }
+
+        def verifier(state):
+            calls.append("verifier")
+            return {"passed": True, "attempts": 1}
+
+        with (
+            patch("byteclaw.graph.workflow.planner_node", planner),
+            patch(
+                "byteclaw.graph.workflow.context_monitor_node",
+                context_monitor,
+            ),
+            patch(
+                "byteclaw.graph.workflow.context_compressor_node",
+                context_compressor,
+            ),
+            patch("byteclaw.graph.workflow.verifier_node", verifier),
+        ):
+            result = build_complex_workflow().invoke({"task": "Build"})
+
+        self.assertEqual(
+            calls,
+            [
+                "planner",
+                "context_monitor",
+                "context_compressor",
+                "verifier",
+                "context_monitor",
+            ],
+        )
         self.assertIn("Status: PASSED", result["final_answer"])
 
     def test_stage3_planner_prompt_defines_supervisor_tools(self) -> None:

@@ -5,7 +5,11 @@ from typing import Any, Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
-from byteclaw.graph.memory import build_layered_memory
+from byteclaw.graph.memory import (
+    build_layered_memory,
+    format_layered_memory_for_prompt,
+    memory_event,
+)
 from byteclaw.graph.nodes import TodoUpdateTool
 from byteclaw.providers.openai_provider import create_model
 from byteclaw.tools.registry import build_tools
@@ -75,6 +79,24 @@ def _update_todos(state: dict, args: dict) -> tuple[list[dict], dict]:
     return todos, result
 
 
+def _code_agent_input(state: dict, instruction: str, memory: dict) -> str:
+    request = {
+        "task": state.get("task", ""),
+        "instruction": instruction,
+        "session_context": state.get(
+            "session_context", state.get("session", {})
+        ),
+        "todos": state.get("todos", []),
+        "research_notes": state.get("research_notes", []),
+        "source_urls": state.get("sources", []),
+    }
+    return (
+        f"{json.dumps(request, ensure_ascii=False, default=str)}"
+        "\n\nLayered memory:\n"
+        f"{format_layered_memory_for_prompt(memory)}"
+    )
+
+
 def run_code_agent(
     state: dict,
     instruction: str,
@@ -87,25 +109,16 @@ def run_code_agent(
     tools = build_tools(state["runtime"])
     tools_by_name = {tool.name: tool for tool in tools}
     agent = create_model().bind_tools([*tools, TodoUpdateTool])
-    request = {
-        "task": state.get("task", ""),
-        "instruction": instruction,
-        "session_context": state.get(
-            "session_context", state.get("session", {})
-        ),
-        "todos": state.get("todos", []),
-        "research_notes": state.get("research_notes", []),
-        "source_urls": state.get("sources", []),
-        "memory": build_layered_memory_snapshot(state),
-    }
+    memory = build_layered_memory_snapshot(state)
+    memory_snapshot_event = memory_event(memory, node="codeAgent")
+    tool_events: list[dict] = [memory_snapshot_event]
+    if writer is not None:
+        writer(memory_snapshot_event)
     messages = [
         SystemMessage(content=CODE_AGENT_PROMPT),
-        HumanMessage(
-            content=json.dumps(request, ensure_ascii=False, default=str)
-        ),
+        HumanMessage(content=_code_agent_input(state, instruction, memory)),
     ]
     todos = [dict(todo) for todo in state.get("todos", [])]
-    tool_events: list[dict] = []
     summary = ""
     last_content = ""
 

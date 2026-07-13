@@ -10,6 +10,7 @@ from byteclaw.graph.memory import (
     _trim_handoffs,
     build_layered_memory,
     format_layered_memory_for_prompt,
+    memory_event,
     read_history_summary,
     read_notepad,
 )
@@ -27,6 +28,18 @@ class LayeredMemoryTests(unittest.TestCase):
             ["2", "3", "4", "5", "6", "7"],
         )
         self.assertIsNot(trimmed[0], handoffs[2])
+
+    def test_memory_event_wraps_snapshot(self) -> None:
+        memory = {
+            "rules": {},
+            "working_memory": {"node": "planner"},
+            "history_summary_store": {},
+        }
+
+        self.assertEqual(
+            memory_event(memory, node="planner"),
+            {"type": "memory", "node": "planner", "memory": memory},
+        )
 
     def test_build_layered_memory_reads_and_trims_all_layers(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
