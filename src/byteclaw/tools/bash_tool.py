@@ -56,8 +56,15 @@ class BashTool:
         approval_handler: ApprovalHandler | None = None,
     ) -> None:
         self.state = state
-        self.approval_mode = normalize_approval_mode(approval_mode)
-        self.approval_handler = approval_handler
+        configured_mode = (
+            state.approval_mode if approval_mode is None else approval_mode
+        )
+        self.approval_mode = normalize_approval_mode(configured_mode)
+        self.approval_handler = (
+            state.approval_handler
+            if approval_handler is None
+            else approval_handler
+        )
 
     def __call__(
         self, command: str, timeout_seconds: float = 30
@@ -142,7 +149,10 @@ class BashTool:
         if self.approval_mode == "deny":
             return f"Command denied by approval policy: {risk_reason}"
         if self.approval_handler is None:
-            return f"Approval required but no approval handler is configured: {risk_reason}"
+            return (
+                "Approval required but no approval handler is configured: "
+                f"{risk_reason}"
+            )
 
         request = ApprovalRequest(
             id=f"approval-{uuid4().hex[:8]}",

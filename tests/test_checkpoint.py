@@ -20,6 +20,14 @@ from byteclaw.core.checkpoint import (
 from byteclaw.core.state import RuntimeState
 
 
+class NonCopyableApprovalHandler:
+    def __call__(self, _request):
+        return None
+
+    def __deepcopy__(self, _memo):
+        raise AssertionError("approval handler must not be deep-copied")
+
+
 class CheckpointTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -97,7 +105,11 @@ class CheckpointTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("git"), "Git is required for snapshots")
     def test_strict_mode_appends_events_and_restores_inputs_and_files(self) -> None:
-        runtime = RuntimeState(self.workspace, checkpoint_mode="strict")
+        runtime = RuntimeState(
+            self.workspace,
+            checkpoint_mode="strict",
+            approval_handler=NonCopyableApprovalHandler(),
+        )
         source = runtime.workspace / "answer.txt"
         source.write_text("saved\n", encoding="utf-8")
         manager = CheckpointManager(runtime, task="original task")

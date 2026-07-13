@@ -100,6 +100,19 @@ class ApprovalTests(unittest.TestCase):
         popen.assert_not_called()
 
     @patch("byteclaw.tools.bash_tool.subprocess.Popen")
+    def test_bash_tool_uses_runtime_approval_configuration(self, popen) -> None:
+        state = RuntimeState(
+            self.state.workspace,
+            approval_mode="deny",
+        )
+
+        result = BashTool(state).run_bash("npm install")
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.requires_approval)
+        popen.assert_not_called()
+
+    @patch("byteclaw.tools.bash_tool.subprocess.Popen")
     def test_inline_mode_passes_request_to_handler(self, popen) -> None:
         requests = []
 

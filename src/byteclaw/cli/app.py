@@ -1,24 +1,42 @@
 """Typer application for the ``byteclaw`` command."""
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.pretty import Pretty
+from typer import Option
 
 from byteclaw.core.agent import stream_agent_events
 
-app = typer.Typer(add_completion=False, no_args_is_help=True)
+app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=True,
+    context_settings={"allow_extra_args": True},
+)
 console = Console()
 
 
 def _render_event(event: dict) -> None:
     """Render one agent event to the terminal."""
 
-    node = event["node"]
-    output = event["output"]
+    event_type = event.get("type")
+    if event_type == "custom_event":
+        console.print(Pretty(event.get("event")))
+        return
+    if event_type == "graph_event":
+        graph_event = event.get("event", {})
+        if isinstance(graph_event, dict):
+            for node, output in graph_event.items():
+                _render_node_output(node, output)
+        return
+    _render_node_output(event["node"], event["output"])
+
+
+def _render_node_output(node: str, output: object) -> None:
+    """Render one graph node output."""
 
     if node == "planner":
         console.print("[bold blue]📋 Planner[/]")
@@ -42,29 +60,33 @@ def _render_event(event: dict) -> None:
 
 @app.command()
 def main(
-    task: Annotated[str, typer.Argument(help="Task for ByteClaw to complete.")],
-    workspace: Annotated[
-        Path,
-        typer.Option(
-            "--workspace",
-            "-w",
-            help="Workspace directory; it is created when missing.",
-            file_okay=False,
-            dir_okay=True,
-        ),
-    ] = Path("workspace"),
-    max_attempts: Annotated[
-        int,
-        typer.Option(
-            "--max-attempts",
-            help="Maximum planner-verifier attempts.",
-            min=1,
-        ),
-    ] = 3,
+    ctx: typer.Context,
+    workspace: Annotated[Path | None, Option("--workspace", "-w")] = None,
+    max_attempts: Annotated[int, Option("--max-attempts")] = 3,
+    approval_mode: Annotated[
+        Literal["inline", "auto", "deny"], Option("--approval-mode")
+    ] = "inline",
+    checkpoint_mode: Annotated[
+        Literal["light", "strict", "off"], Option("--checkpoint-mode")
+    ] = "light",
+    trace_mode: Annotated[
+        Literal["on", "off"], Option("--trace-mode")
+    ] = "on",
+    resume: Annotated[Path | None, Option("--resume")] = None,
 ) -> None:
     """Run ByteClaw on TASK inside a workspace."""
 
+    task = " ".join(ctx.args).strip()
+    if not task and resume is None:
+        raise typer.UsageError("Provide a task or use --resume.")
+
     for event in stream_agent_events(
-        task, workspace=workspace, max_attempts=max_attempts
+        task,
+        workspace=workspace or resume or Path("workspace"),
+        max_attempts=max_attempts,
+        approval_mode=approval_mode,
+        checkpoint_mode=checkpoint_mode,
+        trace_mode=trace_mode,
+        resume_workspace=resume,
     ):
         _render_event(event)
