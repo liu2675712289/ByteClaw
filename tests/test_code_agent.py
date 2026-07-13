@@ -109,7 +109,6 @@ class CodeAgentTests(unittest.TestCase):
                     }
                 ],
                 "session_context": {"attempt": 1},
-                "memory": {"project": ["Use Python"]},
                 "research_notes": ["Use an official Python example"],
                 "sources": ["https://docs.python.org/3/"],
             }
@@ -159,7 +158,14 @@ class CodeAgentTests(unittest.TestCase):
         self.assertEqual(request["task"], "Create an example program")
         self.assertEqual(request["instruction"], "Implement the first todo")
         self.assertEqual(request["session_context"], {"attempt": 1})
-        self.assertEqual(request["memory"], {"project": ["Use Python"]})
+        self.assertEqual(
+            request["memory"]["working_memory"]["node"], "codeAgent"
+        )
+        self.assertEqual(request["memory"], state["memory_snapshot"])
+        self.assertEqual(
+            request["memory"]["history_summary_store"]["history_exists"],
+            False,
+        )
         self.assertEqual(
             request["research_notes"], ["Use an official Python example"]
         )

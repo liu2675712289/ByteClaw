@@ -6,11 +6,24 @@ import subprocess
 from pathlib import Path
 from typing import Any, Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langgraph.config import get_stream_writer
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from pydantic import BaseModel
 
 from byteclaw.core.state import RuntimeState
+from byteclaw.graph.memory import (
+    _short_text,
+    _trim_handoffs,
+    build_layered_memory,
+    format_layered_memory_for_prompt,
+)
 from byteclaw.graph.state import (
     ByteGraphState,
     SourceItem,
@@ -19,6 +32,7 @@ from byteclaw.graph.state import (
 )
 from byteclaw.prompts.stage2 import ACTOR_PROMPT
 from byteclaw.prompts.stage3 import PLANNER_PROMPT, VERIFIER_PROMPT
+from byteclaw.prompts.stage4 import CONTEXT_COMPRESSION_PROMPT
 from byteclaw.providers.openai_provider import create_model
 from byteclaw.tools.registry import build_read_only_tools, build_tools
 
@@ -371,6 +385,7 @@ def planner_node(state: ByteGraphState) -> dict:
     new_messages = working_state.get("messages", [])[initial_message_count:]
     if new_messages:
         update["messages"] = new_messages
+    update["context_next_node"] = "verifier"
     return update
 
 
@@ -612,7 +627,149 @@ def verifier_node(state: ByteGraphState) -> dict:
     }
     if not passed:
         update["last_error"] = last_error
+        update["context_next_node"] = "planner"
     return update
+
+
+def context_monitor_node(state: ByteGraphState) -> dict:
+    """Estimate prompt size and decide whether context needs compression."""
+
+    memory = build_layered_memory(state, node="context_monitor")
+    memory_payload = SystemMessage(
+        content=format_layered_memory_for_prompt(memory)
+    )
+    messages = [*state.get("messages", []), memory_payload]
+    model = create_model()
+    try:
+        token_count = model.get_num_tokens_from_messages(messages)
+    except Exception:
+        text = "\n".join(
+            _content_to_text(getattr(message, "content", message))
+            for message in messages
+        )
+        token_count = len(text) // 4
+
+    context_token_limit = state.get("context_token_limit", 400000)
+    return {
+        "context_token_count": token_count,
+        "context_should_compress": token_count > context_token_limit,
+        "context_next_node": state.get("context_next_node", "verifier"),
+    }
+
+
+def context_monitor_route(state: ByteGraphState) -> str:
+    """Route through compression when the assembled context is too large."""
+
+    if state.get("passed"):
+        return "final"
+    if state.get("context_should_compress"):
+        return "context_compressor"
+    return state.get("context_next_node", "verifier")
+
+
+def _compression_handoffs(state: ByteGraphState) -> list[dict]:
+    handoffs = _trim_handoffs(state.get("agent_handoffs", []))
+    for handoff in handoffs:
+        if "instruction" in handoff:
+            handoff["instruction"] = _short_text(
+                handoff["instruction"], 600
+            )
+        if "result" in handoff:
+            handoff["result"] = _short_text(handoff["result"], 1000)
+    return handoffs
+
+
+def _compression_sources(sources: Any) -> list[dict[str, str]]:
+    normalized = _normalized_sources(sources if isinstance(sources, list) else [])
+    return [
+        {
+            "title": _short_text(source.get("title", ""), 300),
+            "url": _short_text(source.get("url", ""), 1000),
+        }
+        for source in normalized
+    ]
+
+
+def context_compressor_node(state: ByteGraphState) -> dict:
+    """Compress graph messages and persist a durable history summary."""
+
+    memory = build_layered_memory(state, node="context_compressor")
+    serialized_messages = [
+        message.model_dump(mode="json")
+        if hasattr(message, "model_dump")
+        else message
+        for message in state.get("messages", [])
+    ]
+    compression_context = {
+        "messages": serialized_messages,
+        "layered_memory": memory,
+    }
+    model = create_model()
+    response = model.invoke(
+        [
+            SystemMessage(content=CONTEXT_COMPRESSION_PROMPT),
+            HumanMessage(
+                content=json.dumps(
+                    compression_context,
+                    ensure_ascii=False,
+                    default=str,
+                )
+            ),
+        ]
+    )
+    try:
+        compressed = _parse_json_content(response.content)
+    except ValueError:
+        compressed = {"summary": _content_to_text(response.content)}
+    summary = _short_text(compressed.get("summary", ""), 6000)
+
+    compressed_message = AIMessage(content=summary)
+    try:
+        token_count = model.get_num_tokens_from_messages([compressed_message])
+    except Exception:
+        token_count = len(summary) // 4
+
+    history_path = state["runtime"].workspace / "HISTORY_SUMMARY.md"
+    history_path.write_text(summary, encoding="utf-8")
+
+    compression_events = [
+        dict(event) for event in state.get("compression_events", [])
+    ]
+    compression_events.append(
+        {
+            "node": "context_compressor",
+            "token_count_before": state.get("context_token_count", 0),
+            "token_count_after": token_count,
+            "summary_chars": len(summary),
+            "next_node": state.get("context_next_node", "verifier"),
+        }
+    )
+
+    sources = compressed.get("sources") or state.get("sources", [])
+    return {
+        "messages": [
+            RemoveMessage(id=REMOVE_ALL_MESSAGES),
+            compressed_message,
+        ],
+        "context_summary": summary,
+        "context_token_count": token_count,
+        "context_should_compress": False,
+        "plan_summary": _short_text(state.get("plan_summary", ""), 1200),
+        "research_notes": _short_text(
+            state.get("research_notes", ""), 1600
+        ),
+        "sources": _compression_sources(sources),
+        "agent_handoffs": _compression_handoffs(state),
+        "code_agent_summary": _short_text(
+            state.get("code_agent_summary", ""), 1000
+        ),
+        "verifier_summary": _short_text(
+            state.get("verifier_summary", ""), 1000
+        ),
+        "last_error": _short_text(state.get("last_error", ""), 1400),
+        "history_summary": summary,
+        "compression_events": compression_events,
+    }
 
 
 def verifier_route(state: ByteGraphState) -> str:

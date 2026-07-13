@@ -3,6 +3,8 @@
 from byteclaw.graph.state import (
     AgentHandoff,
     ByteGraphState,
+    CompressionEvent,
+    LayeredMemory,
     SourceItem,
     TodoItem,
     VerificationCheck,
@@ -12,6 +14,8 @@ from byteclaw.graph.state import (
 __all__ = [
     "AgentHandoff",
     "ByteGraphState",
+    "CompressionEvent",
+    "LayeredMemory",
     "SourceItem",
     "TodoItem",
     "VerificationCheck",

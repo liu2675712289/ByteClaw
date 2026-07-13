@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
+from byteclaw.graph.memory import build_layered_memory
 from byteclaw.graph.nodes import TodoUpdateTool
 from byteclaw.providers.openai_provider import create_model
 from byteclaw.tools.registry import build_tools
@@ -33,9 +34,11 @@ Rules:
 
 
 def build_layered_memory_snapshot(state: dict) -> Any:
-    """Return the current memory payload until layered memory is implemented."""
+    """Build and retain the current codeAgent memory snapshot."""
 
-    return state.get("memory", {})
+    memory = build_layered_memory(state, node="codeAgent")
+    state["memory_snapshot"] = memory
+    return memory
 
 
 def _content_to_text(content: Any) -> str:

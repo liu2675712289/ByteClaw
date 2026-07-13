@@ -7,6 +7,8 @@ from langgraph.graph.message import add_messages
 from byteclaw.graph.state import (
     AgentHandoff,
     ByteGraphState,
+    CompressionEvent,
+    LayeredMemory,
     SourceItem,
     TodoItem,
     VerificationResult,
@@ -52,6 +54,16 @@ class GraphStateTests(unittest.TestCase):
             get_args(annotations["agent_handoffs"]), (AgentHandoff,)
         )
         self.assertIs(annotations["code_agent_summary"], str)
+        self.assertIs(annotations["context_summary"], str)
+        self.assertIs(annotations["context_token_count"], int)
+        self.assertIs(annotations["context_token_limit"], int)
+        self.assertIs(annotations["context_should_compress"], bool)
+        self.assertIs(annotations["context_next_node"], str)
+        self.assertEqual(
+            get_args(annotations["compression_events"]), (CompressionEvent,)
+        )
+        self.assertIs(annotations["memory_snapshot"], LayeredMemory)
+        self.assertIs(annotations["history_summary"], str)
 
 
 if __name__ == "__main__":

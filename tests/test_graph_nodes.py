@@ -5,7 +5,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 
 from byteclaw.core.state import RuntimeState
 from byteclaw.graph.nodes import (
@@ -16,6 +22,9 @@ from byteclaw.graph.nodes import (
     _call_code_agent_tool,
     _call_search_agent_tool,
     actor_node,
+    context_compressor_node,
+    context_monitor_node,
+    context_monitor_route,
     planner_node,
     verifier_node,
     verifier_route,
@@ -145,6 +154,7 @@ class GraphNodeTests(unittest.TestCase):
         )
         self.assertEqual(update["code_agent_summary"], "Implemented index.html")
         self.assertEqual(update["messages"], [code_message])
+        self.assertEqual(update["context_next_node"], "verifier")
         self.assertEqual(
             [item["to_agent"] for item in update["agent_handoffs"]],
             ["searchAgent", "codeAgent"],
@@ -481,6 +491,170 @@ class GraphNodeTests(unittest.TestCase):
         self.assertEqual(update["verification_results"][0]["exit_code"], 7)
         self.assertIn("Failed commands", update["last_error"])
         self.assertEqual(update["todos"][0]["status"], "blocked")
+        self.assertEqual(update["context_next_node"], "planner")
+
+    def test_context_monitor_uses_model_token_count(self) -> None:
+        class TokenModel:
+            def __init__(self) -> None:
+                self.messages = []
+
+            def get_num_tokens_from_messages(self, messages):
+                self.messages = messages
+                return 25
+
+        model = TokenModel()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = {
+                "runtime": RuntimeState(Path(temp_dir)),
+                "messages": [AIMessage(content="Current context")],
+                "context_token_limit": 20,
+                "context_next_node": "planner",
+            }
+            with patch("byteclaw.graph.nodes.create_model", return_value=model):
+                update = context_monitor_node(state)
+
+        self.assertEqual(update["context_token_count"], 25)
+        self.assertTrue(update["context_should_compress"])
+        self.assertEqual(update["context_next_node"], "planner")
+        self.assertIsInstance(model.messages[-1], SystemMessage)
+        self.assertIn("working_memory", model.messages[-1].content)
+
+    def test_context_monitor_falls_back_to_character_estimate(self) -> None:
+        class FailingTokenModel:
+            def get_num_tokens_from_messages(self, messages):
+                raise RuntimeError("tokenizer unavailable")
+
+        state = {"messages": [AIMessage(content="x" * 20)]}
+        with (
+            patch("byteclaw.graph.nodes.create_model", return_value=FailingTokenModel()),
+            patch("byteclaw.graph.nodes.build_layered_memory", return_value={}),
+            patch(
+                "byteclaw.graph.nodes.format_layered_memory_for_prompt",
+                return_value="y" * 20,
+            ),
+        ):
+            update = context_monitor_node(
+                {**state, "context_token_limit": 9}
+            )
+
+        self.assertEqual(update["context_token_count"], 10)
+        self.assertTrue(update["context_should_compress"])
+        self.assertEqual(update["context_next_node"], "verifier")
+
+    def test_context_monitor_route(self) -> None:
+        self.assertEqual(
+            context_monitor_route(
+                {"passed": True, "context_should_compress": True}
+            ),
+            "final",
+        )
+        self.assertEqual(
+            context_monitor_route({"context_should_compress": True}),
+            "context_compressor",
+        )
+        self.assertEqual(
+            context_monitor_route({"context_next_node": "planner"}),
+            "planner",
+        )
+        self.assertEqual(context_monitor_route({}), "verifier")
+
+    def test_context_compressor_replaces_and_persists_history(self) -> None:
+        compressed_payload = {
+            "summary": "Compressed task context",
+            "active_goal": "Finish the implementation",
+            "completed_work": ["Created the memory module"],
+            "open_todos": ["Run verification"],
+            "important_files": ["src/example.py"],
+            "tool_findings": ["Tests currently pass"],
+            "sources": [
+                {
+                    "title": "Official docs",
+                    "url": "https://example.com/docs",
+                }
+            ],
+            "next_steps": ["Verify the result"],
+            "risks": [],
+        }
+
+        class CompressionModel:
+            def __init__(self) -> None:
+                self.messages = []
+
+            def invoke(self, messages):
+                self.messages = messages
+                return AIMessage(content=json.dumps(compressed_payload))
+
+            def get_num_tokens_from_messages(self, messages):
+                return 7
+
+        model = CompressionModel()
+        old_message = AIMessage(content="Old transcript", id="old-1")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            state = {
+                "runtime": RuntimeState(workspace),
+                "task": "Finish the feature",
+                "messages": [old_message],
+                "plan_summary": "P" * 1300,
+                "research_notes": "R" * 1700,
+                "sources": [],
+                "agent_handoffs": [
+                    {
+                        "instruction": str(index) + "I" * 700,
+                        "result": "X" * 1100,
+                    }
+                    for index in range(8)
+                ],
+                "code_agent_summary": "C" * 1100,
+                "verifier_summary": "V" * 1100,
+                "last_error": "E" * 1500,
+                "context_token_count": 500000,
+                "context_next_node": "planner",
+                "compression_events": [{"node": "previous"}],
+            }
+            with patch("byteclaw.graph.nodes.create_model", return_value=model):
+                update = context_compressor_node(state)
+
+            history = (workspace / "HISTORY_SUMMARY.md").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertEqual(history, "Compressed task context")
+        self.assertIsInstance(update["messages"][0], RemoveMessage)
+        self.assertEqual(update["messages"][0].id, REMOVE_ALL_MESSAGES)
+        self.assertEqual(
+            update["messages"][1].content, "Compressed task context"
+        )
+        reduced = add_messages(state["messages"], update["messages"])
+        self.assertEqual(len(reduced), 1)
+        self.assertEqual(reduced[0].content, "Compressed task context")
+        self.assertEqual(update["context_summary"], "Compressed task context")
+        self.assertEqual(update["history_summary"], "Compressed task context")
+        self.assertEqual(update["context_token_count"], 7)
+        self.assertFalse(update["context_should_compress"])
+        self.assertEqual(len(update["plan_summary"]), 1200)
+        self.assertEqual(len(update["research_notes"]), 1600)
+        self.assertEqual(len(update["agent_handoffs"]), 6)
+        self.assertEqual(len(update["agent_handoffs"][0]["instruction"]), 600)
+        self.assertEqual(len(update["agent_handoffs"][0]["result"]), 1000)
+        self.assertEqual(
+            update["sources"],
+            [
+                {
+                    "title": "Official docs",
+                    "url": "https://example.com/docs",
+                }
+            ],
+        )
+        self.assertEqual(len(update["compression_events"]), 2)
+        event = update["compression_events"][-1]
+        self.assertEqual(event["token_count_before"], 500000)
+        self.assertEqual(event["token_count_after"], 7)
+        self.assertEqual(event["next_node"], "planner")
+        self.assertIsInstance(model.messages[0], SystemMessage)
+        self.assertIn("context_compressor", model.messages[0].content)
+        self.assertIn("Old transcript", model.messages[1].content)
+        self.assertIn("layered_memory", model.messages[1].content)
 
     def test_verifier_forces_final_verdict_after_tool_step_limit(self) -> None:
         read_tool = FakeTool("file_read", "contents")

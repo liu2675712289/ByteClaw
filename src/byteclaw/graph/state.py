@@ -1,6 +1,6 @@
 """Shared state schema for the ByteClaw LangGraph workflow."""
 
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -27,6 +27,24 @@ class AgentHandoff(TypedDict, total=False):
     to_agent: str
     instruction: str
     result: str
+
+
+class CompressionEvent(TypedDict, total=False):
+    timestamp: str
+    node: str
+    token_count: int
+    token_limit: int
+    summary: str
+    token_count_before: int
+    token_count_after: int
+    summary_chars: int
+    next_node: str
+
+
+class LayeredMemory(TypedDict):
+    rules: dict[str, Any]
+    working_memory: dict[str, Any]
+    history_summary_store: dict[str, Any]
 
 
 class VerificationResult(TypedDict):
@@ -61,5 +79,14 @@ class ByteGraphState(TypedDict, total=False):
     sources: list[SourceItem]
     agent_handoffs: list[AgentHandoff]
     code_agent_summary: str
+    verifier_summary: str
+    context_summary: str
+    context_token_count: int
+    context_token_limit: int
+    context_should_compress: bool
+    context_next_node: str
+    compression_events: list[CompressionEvent]
+    memory_snapshot: LayeredMemory
+    history_summary: str
     last_error: str
     final_answer: str
