@@ -1,5 +1,5 @@
 
-![1783862089204](images/README/logo.png)
+![1783862089204](images/logo.png)
 
 <div align="center">
 
