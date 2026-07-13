@@ -9,9 +9,7 @@
 
 # ByteClaw
 
-### An open-source coding agent harness built for the terminal.
-
-**ByteClaw是一个能够自我进化的Agent Harness。**
+### ByteClaw是一个能够自我进化的Agent Harness。
 
 <br>
 
