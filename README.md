@@ -9,15 +9,11 @@
 
 # ByteClaw
 
-### ByteClaw是一个能够自我进化的Agent Harness。
+### ByteClaw是一个能够自我进化的Agent Harness
 
 <br>
 
 
-[快速开始](#-快速开始) ·
-[核心功能](#-核心功能) ·
-[工作原理](#-工作原理) ·
-[开发计划](#-开发计划)
 
 </div>
 
