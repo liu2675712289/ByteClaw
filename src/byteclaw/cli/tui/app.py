@@ -9,10 +9,12 @@ import typer
 from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
+from textual.containers import Horizontal
 from textual.message import Message
-from textual.widgets import Header, Input, RichLog, Static
+from textual.widgets import Input, RichLog, Static
 from typer import Option
 
+from byteclaw import __version__
 from byteclaw.cli.tui.approval import (
     ApprovalGate,
     ApprovalModal,
@@ -22,6 +24,7 @@ from byteclaw.cli.tui.logo import ByteClawLogo
 from byteclaw.core.agent import stream_session_events
 from byteclaw.core.approval import ApprovalDecision, ApprovalRequest
 from byteclaw.core.session import load_or_create_session
+from byteclaw.providers.openai_provider import get_model_name
 
 
 tui_cli = typer.Typer(
@@ -49,42 +52,81 @@ class ByteClawTuiApp(App[None]):
     CSS = """
     Screen {
         layout: vertical;
+        padding: 0 2;
+        background: #101010;
+        color: #f5f5f5;
     }
 
-    Header {
-        height: 1;
+    #brand-panel {
+        width: 100%;
+        height: 4;
+        padding: 0 1;
+        background: #101010;
+    }
+
+    #brand-info {
+        width: 1fr;
+        height: 4;
+        padding: 0 1;
+        content-align: left middle;
+        background: #101010;
     }
 
     #status-bar {
+        display: none;
         width: 100%;
         height: 1;
         padding: 0 1;
-        content-align: right middle;
-        background: $surface;
-        color: $text-muted;
+        content-align: left middle;
+        background: #101010;
+        color: #999999;
     }
 
     #plan-panel {
         width: 100%;
-        min-height: 3;
-        max-height: 9;
-        padding: 1 2;
-        border: round $primary;
+        min-height: 1;
+        max-height: 7;
+        margin-top: 1;
+        padding: 0 1;
+        border-left: solid #48968c;
+        background: #171717;
+        color: #cfdad8;
         overflow-y: auto;
     }
 
     #event-log {
         width: 100%;
         height: 1fr;
-        padding: 0 1;
-        border: round $secondary;
+        padding: 1;
+        border: none;
+        background: #101010;
+        color: #f5f5f5;
     }
 
     #task-input {
         width: 100%;
         height: 3;
-        margin-top: 1;
-        border: tall $accent;
+        padding: 0 1;
+        border: round #9b7f00;
+        background: #171717;
+        color: #f5f5f5;
+    }
+
+    #task-input:focus {
+        border: round #d0b000;
+    }
+
+    #task-input:disabled {
+        border: round #505050;
+        color: #999999;
+    }
+
+    #input-help {
+        width: 100%;
+        height: 1;
+        padding: 0 1;
+        background: #101010;
+        color: #888888;
     }
     """
 
@@ -99,6 +141,8 @@ class ByteClawTuiApp(App[None]):
     ) -> None:
         super().__init__()
         self.workspace = Path(workspace or "workspace").expanduser().resolve()
+        self.model_name = get_model_name()
+        self.app_version = __version__
         session = load_or_create_session(self.workspace)
         self.session_id = str(session.get("session_id", "unknown"))
         self.max_attempts = max_attempts
@@ -106,12 +150,13 @@ class ByteClawTuiApp(App[None]):
         self.checkpoint_mode = checkpoint_mode
         self.trace_mode = trace_mode
         self.event_lines: list[str] = []
-        self.plan_text = "[Plan] No active plan"
+        self.plan_text = "Plan  ·  No active plan"
         self._busy = False
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=False)
-        yield ByteClawLogo(id="byteclaw-logo")
+        with Horizontal(id="brand-panel"):
+            yield ByteClawLogo(id="byteclaw-logo")
+            yield Static(self._brand_text(), id="brand-info")
         yield Static(self._status_text("ready"), id="status-bar", markup=False)
         yield Static(Text(self.plan_text), id="plan-panel")
         yield RichLog(
@@ -122,8 +167,13 @@ class ByteClawTuiApp(App[None]):
             max_lines=2000,
         )
         yield Input(
-            placeholder="💬 Input: ask a question or describe a task",
+            placeholder="Ask ByteClaw to explain, search, or change code…",
             id="task-input",
+        )
+        yield Static(
+            f"{self.workspace}  ·  Enter to send",
+            id="input-help",
+            markup=False,
         )
 
     def on_mount(self) -> None:
@@ -308,15 +358,28 @@ class ByteClawTuiApp(App[None]):
             status = str(todo.get("status", "pending"))
             label = todo.get("content") or todo.get("id") or "todo"
             items.append(f"{icons.get(status, '⬜')} {label}")
-        self.plan_text = "[Plan] " + "  ".join(items)
+        self.plan_text = "Plan  ·  " + "  ".join(items)
         self.query_one("#plan-panel", Static).update(Text(self.plan_text))
 
     def _log(self, line: str) -> None:
         self.event_lines.append(line)
-        self.query_one("#event-log", RichLog).write(Text(line))
+        self.query_one("#event-log", RichLog).write(
+            Text(line, style=_event_line_style(line))
+        )
 
     def _status_text(self, state: str) -> str:
-        return f"session: {self.session_id[:12]} • {state}"
+        return (
+            f"{state}  ·  session {self.session_id[:8]}  ·  "
+            f"approval {self.approval_mode}  ·  checkpoint {self.checkpoint_mode}"
+        )
+
+    def _brand_text(self) -> Text:
+        text = Text(no_wrap=True, overflow="ellipsis")
+        text.append("ByteClaw", style="bold #f5f5f5")
+        text.append(f" v{self.app_version}", style="#999999")
+        text.append(f"\n{self.model_name}", style="#999999")
+        text.append(f"\n{self.workspace}", style="#999999")
+        return text
 
     def _set_status(self, state: str) -> None:
         self.query_one("#status-bar", Static).update(self._status_text(state))
@@ -327,6 +390,28 @@ def _event_todos(event: Mapping[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(todos, list):
         return []
     return [dict(todo) for todo in todos if isinstance(todo, Mapping)]
+
+
+def _event_line_style(line: str) -> str:
+    """Return a restrained semantic style for one transcript line."""
+
+    if line.startswith("💬 You:"):
+        return "bold #f5f5f5 on #373737"
+    if line.startswith(("✨", "🤖")):
+        return "#f5f5f5"
+    if line.startswith(("🔧", "🔍", "📝")):
+        return "#b1b9f9"
+    if line.startswith(("📋", "🔄", "💾", "↪")):
+        return "#78b6ad"
+    if line.startswith("✅"):
+        return "#4eba65"
+    if line.startswith(("❌", "⛔")):
+        return "#ff6b80"
+    if line.startswith("⚠"):
+        return "#ffc107"
+    if line.startswith("🐾"):
+        return "#d0b000"
+    return "#b5b5b5"
 
 
 def _format_tool_call(name: str, args: Any) -> str:

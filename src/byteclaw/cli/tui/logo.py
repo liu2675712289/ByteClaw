@@ -5,32 +5,31 @@ from textual.timer import Timer
 from textual.widgets import Static
 
 
-LOGO_TITLE = " 🐾 ByteClaw"
-LOGO_RULE = " ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-LOGO_STAGE = "  Stage 6 · MultiAgent + Context/Harness"
-
+LOGO_TITLE = "\n".join(
+    (
+        " █▄█   █▄█ ",
+        "▄▄▀▀███▀▀▄▄",
+        "▀█████████▀",
+        "▀ ▀ ▀ ▀ ▀ ▀",
+    )
+)
 _ANIMATION_STYLES = (
-    ("bold bright_cyan", "cyan", "bright_white"),
-    ("bold bright_blue", "bright_cyan", "white"),
-    ("bold bright_magenta", "bright_blue", "bright_cyan"),
-    ("bold bright_white", "bright_magenta", "bright_blue"),
-    ("bold bright_magenta", "bright_blue", "bright_cyan"),
-    ("bold bright_blue", "bright_cyan", "white"),
-    ("bold bright_cyan", "cyan", "bright_white"),
+    "bold #d0b000",
+    "bold #d8bb1f",
+    "bold #e0c43a",
+    "bold #e8d266",
+    "bold #e0c43a",
+    "bold #d8bb1f",
+    "bold #d0b000",
 )
 
 
 def render_logo(frame: int = 0) -> Text:
     """Render one colored animation frame as a Rich Text object."""
 
-    title_style, rule_style, stage_style = _ANIMATION_STYLES[
-        frame % len(_ANIMATION_STYLES)
-    ]
+    title_style = _ANIMATION_STYLES[frame % len(_ANIMATION_STYLES)]
     logo = Text(justify="center")
-    logo.append(f"{LOGO_TITLE}\n", style=title_style)
-    logo.append(f"{LOGO_RULE}\n", style=rule_style)
-    logo.append(f"{LOGO_STAGE}\n", style=stage_style)
-    logo.append(LOGO_RULE, style=rule_style)
+    logo.append(LOGO_TITLE, style=title_style)
     return logo
 
 
@@ -39,11 +38,11 @@ class ByteClawLogo(Static):
 
     DEFAULT_CSS = """
     ByteClawLogo {
-        width: 100%;
-        height: 5;
+        width: 13;
+        height: 4;
         padding: 0 1;
         content-align: center middle;
-        background: $background;
+        background: #101010;
     }
     """
 

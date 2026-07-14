@@ -67,35 +67,39 @@ class ApprovalModal(ModalScreen[bool]):
     CSS = """
     ApprovalModal {
         align: center middle;
-        background: $background 70%;
+        background: #000000 70%;
     }
 
     #approval-dialog {
-        width: 80%;
-        max-width: 100;
+        width: 72%;
+        max-width: 90;
         height: auto;
         padding: 1 2;
-        border: thick $warning;
-        background: $surface;
+        border: round #d0b000;
+        background: #1a1a1a;
+        color: #f5f5f5;
     }
 
     #approval-title {
         width: 100%;
-        text-align: center;
+        text-align: left;
         text-style: bold;
-        color: $warning;
+        color: #d0b000;
         margin-bottom: 1;
     }
 
     .approval-field {
         margin-bottom: 1;
+        color: #b5b5b5;
     }
 
     #approval-command {
         width: 100%;
         max-height: 8;
         padding: 1;
-        border: round $secondary;
+        border: round #6b5800;
+        background: #101010;
+        color: #f5f5f5;
         overflow-y: auto;
     }
 

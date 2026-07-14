@@ -1,10 +1,12 @@
 import tempfile
 import threading
 import unittest
+from os import environ
 from pathlib import Path
 from unittest.mock import patch
 
-from textual.widgets import Input
+from textual.containers import Horizontal
+from textual.widgets import Input, Static
 from typer.testing import CliRunner
 
 from byteclaw.cli.tui.app import (
@@ -19,8 +21,6 @@ from byteclaw.cli.tui.approval import (
     ApprovalRequestedMessage,
 )
 from byteclaw.cli.tui.logo import (
-    LOGO_RULE,
-    LOGO_STAGE,
     LOGO_TITLE,
     ByteClawLogo,
     render_logo,
@@ -46,16 +46,18 @@ class ApprovalGateTests(unittest.TestCase):
 
 
 class LogoTests(unittest.TestCase):
-    def test_render_logo_contains_stage_banner_and_rich_styles(self) -> None:
+    def test_render_logo_contains_title_and_rich_styles(self) -> None:
         logo = render_logo()
 
         self.assertEqual(
             logo.plain,
-            "\n".join((LOGO_TITLE, LOGO_RULE, LOGO_STAGE, LOGO_RULE)),
+            LOGO_TITLE,
         )
+        self.assertEqual(len(LOGO_TITLE.splitlines()), 4)
+        self.assertEqual(max(map(len, LOGO_TITLE.splitlines())), 11)
+        self.assertNotIn("Self-evolving Agent Harness", logo.plain)
         self.assertGreater(len(logo.spans), 0)
         self.assertNotEqual(render_logo(0).spans, render_logo(1).spans)
-
 
 class TuiTests(unittest.IsolatedAsyncioTestCase):
     def test_tui_cli_passes_runtime_options_to_app(self) -> None:
@@ -157,6 +159,25 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                     "🔄 Handoff: planner → codeAgent",
                     app.event_lines,
                 )
+
+    async def test_brand_panel_shows_version_model_and_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(environ, {"OPENAI_MODEL": "test-model"}):
+                app = ByteClawTuiApp(Path(temp_dir) / "workspace")
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+                    panel = app.query_one("#brand-panel", Horizontal)
+                    logo = app.query_one("#byteclaw-logo", ByteClawLogo)
+                    status_bar = app.query_one("#status-bar", Static)
+
+                    self.assertEqual(panel.size.height, 4)
+                    self.assertEqual(logo.outer_size.width, 13)
+                    self.assertFalse(status_bar.display)
+                    self.assertEqual(
+                        app._brand_text().plain,
+                        f"ByteClaw v{app.app_version}\n"
+                        f"test-model\n{app.workspace}",
+                    )
 
     async def test_input_runs_session_turn_and_reenables_input(self) -> None:
         events = iter(
